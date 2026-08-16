@@ -127,6 +127,9 @@ dependencies {
     implementation(libs.supabase.auth.kt)
     implementation(libs.ktor.client.android)
 
+    // Supabase Storage (upload automático de chunk — ver am1-2)
+    implementation(libs.supabase.storage.kt)
+
     // OkHttp Logging (debug only)
     debugImplementation(libs.okhttp.logging.interceptor)
 
@@ -135,6 +138,7 @@ dependencies {
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.work.testing)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.sqlite.jdbc)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

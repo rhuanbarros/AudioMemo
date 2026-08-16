@@ -5,11 +5,16 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import android.util.Log
+import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker
 import com.example.audiomemo.features.transcript.data.worker.UploadPreferences
 import com.example.audiomemo.data.db.dao.ChunkDao
 import com.example.audiomemo.data.db.dao.SessionDao
@@ -44,6 +49,33 @@ class AudioRecordingService : Service() {
     companion object {
         const val ACTION_STOP = "com.example.audiomemo.action.STOP_RECORDING"
         const val ACTION_RESUME = "com.example.audiomemo.action.RESUME_RECORDING"
+        private const val TAG = "AudioRecordingService"
+
+        /**
+         * Builds the exact [OneTimeWorkRequest] [enqueueSupabaseUpload] passes to `WorkManager`.
+         * Extracted as a pure, `Context`-free `internal` function — building a `WorkRequest`
+         * needs no `WorkManager`/`Context` at all (only the actual *enqueue* call does) — so
+         * [com.example.audiomemo.features.transcript.service.AudioRecordingServiceConflictResolutionTest]
+         * can assert the FR5 network constraint (`CONNECTED`, never Wi-Fi-only) and the input data
+         * directly, without `WorkManagerTestInitHelper` (which needs a real or Robolectric
+         * `Context` this project doesn't have — see that test file's docblock).
+         */
+        internal fun buildSupabaseUploadWorkRequest(chunkId: Long, sessionId: Long): OneTimeWorkRequest =
+            OneTimeWorkRequestBuilder<SupabaseUploadWorker>()
+                .setConstraints(
+                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+                )
+                .setInputData(
+                    workDataOf(
+                        SupabaseUploadWorker.KEY_CHUNK_ID to chunkId,
+                        SupabaseUploadWorker.KEY_SESSION_ID to sessionId
+                    )
+                )
+                .build()
+
+        /** The unique WorkManager work name [enqueueSupabaseUpload] enqueues under, for a given chunk. */
+        internal fun supabaseUploadWorkName(chunkId: Long): String =
+            "${SupabaseUploadWorker.WORK_NAME_PREFIX}$chunkId"
     }
 
     inner class LocalBinder : Binder() {
@@ -109,7 +141,13 @@ class AudioRecordingService : Service() {
                 val chunkId = sessionStateManager.saveChunk(file.absolutePath)
                 val sessionId = sessionStateManager.currentSessionId
                 if (chunkId > 0L && sessionId > 0L) {
-                    enqueueChunkUpload(chunkId, sessionId)
+                    // Each enqueue is isolated: a failure enqueuing one worker (e.g. WorkManager
+                    // internals throwing) must never prevent the other from running — they are
+                    // independent upload pipelines (Whisper vs Supabase) for the same chunk.
+                    runCatching { enqueueChunkUpload(chunkId, sessionId) }
+                        .onFailure { Log.w(TAG, "Failed to enqueue WhisperUploadWorker for chunk $chunkId", it) }
+                    runCatching { enqueueSupabaseUpload(chunkId, sessionId) }
+                        .onFailure { Log.w(TAG, "Failed to enqueue SupabaseUploadWorker for chunk $chunkId", it) }
                 }
             }
         }
@@ -464,6 +502,21 @@ class AudioRecordingService : Service() {
                     )
                 )
                 .build()
+        )
+    }
+
+    /**
+     * Enqueues [SupabaseUploadWorker] for a finished chunk. Unlike [enqueueChunkUpload] (which
+     * respects the Wi-Fi-only [UploadPreferences] toggle for Whisper), this is always constrained
+     * to [NetworkType.CONNECTED] — never Wi-Fi-only — a deliberate FR5 decision, independent of
+     * the user's Whisper upload preference.
+     */
+    private fun enqueueSupabaseUpload(chunkId: Long, sessionId: Long) {
+        if (chunkId <= 0L || sessionId <= 0L) return
+        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
+            supabaseUploadWorkName(chunkId),
+            ExistingWorkPolicy.KEEP,
+            buildSupabaseUploadWorkRequest(chunkId, sessionId)
         )
     }
 

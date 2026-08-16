@@ -26,6 +26,7 @@ datastore = "1.1.1"
 kotest = "5.9.1"
 supabase = "2.2.3"
 ktor = "2.3.9"
+sqliteJdbc = "3.53.2.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -87,8 +88,14 @@ work-testing = { module = "androidx.work:work-testing", version.ref = "workManag
 # Supabase (Auth only — login persistente, ver am1-1)
 supabase-auth-kt = { module = "io.github.jan-tennert.supabase:gotrue-kt", version.ref = "supabase" }
 
+# Supabase Storage (upload de chunks — ver am1-2)
+supabase-storage-kt = { module = "io.github.jan-tennert.supabase:storage-kt", version.ref = "supabase" }
+
 # Ktor client engine (transporte HTTP exigido pelo supabase-kt)
 ktor-client-android = { module = "io.ktor:ktor-client-android", version.ref = "ktor" }
+
+# SQLite JDBC driver — plain-JVM validation of raw Room Migration SQL (ver am1-2 code review item 10)
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqliteJdbc" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

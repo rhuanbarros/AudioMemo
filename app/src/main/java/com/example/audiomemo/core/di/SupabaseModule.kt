@@ -15,17 +15,29 @@ import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
 import io.github.jan.supabase.gotrue.SessionManager
 import io.github.jan.supabase.gotrue.user.UserSession
+import io.github.jan.supabase.storage.Storage
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import java.io.IOException
 import javax.inject.Singleton
+import kotlin.time.Duration.Companion.seconds
 
 private const val TAG = "SupabaseModule"
 
 /**
- * Provides the single [SupabaseClient] instance for the app, with the Auth plugin installed.
- * Session persistence is backed by the same [DataStore] already provided by [PreferencesModule],
- * so login survives app restarts without a dedicated DataStore instance.
+ * Provides the single [SupabaseClient] instance for the app, with the Auth and Storage plugins
+ * installed. Session persistence is backed by the same [DataStore] already provided by
+ * [PreferencesModule], so login survives app restarts without a dedicated DataStore instance.
+ *
+ * `requestTimeout` is raised from supabase-kt's own 10s default to 60s: an audio chunk upload
+ * (am1-2, [io.github.jan.supabase.storage.upload]) can legitimately take longer than 10s on a
+ * slow/congested mobile connection — FR5 requires uploads to work on *any* network, not just
+ * Wi-Fi — and a spurious [io.ktor.client.plugins.HttpRequestTimeoutException] there would just
+ * burn one of `SupabaseUploadWorker`'s 3 retry attempts on a slow-but-otherwise-healthy upload.
+ * `requestTimeout` is `SupabaseClientBuilder`'s own public, documented setting for this — the
+ * `install(HttpTimeout) { ... }` route (via the `@SupabaseInternal`-annotated `httpConfig {}`
+ * escape hatch) is unnecessary here and explicitly flagged by the SDK itself as "only if you
+ * know what you're doing".
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -45,9 +57,11 @@ object SupabaseModule {
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
         ) {
+            requestTimeout = 60.seconds
             install(Auth) {
                 sessionManager = DataStoreSessionManager(dataStore)
             }
+            install(Storage)
         }
     }
 }

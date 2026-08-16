@@ -29,6 +29,12 @@ interface ChunkDao {
     @Query("UPDATE chunks SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: ChunkStatus)
 
+    @Query("SELECT * FROM chunks WHERE supabaseUploadStatus = :status")
+    suspend fun getChunksBySupabaseUploadStatus(status: ChunkStatus): List<ChunkEntity>
+
+    @Query("UPDATE chunks SET supabaseUploadStatus = :status WHERE id = :id")
+    suspend fun updateSupabaseUploadStatus(id: Long, status: ChunkStatus)
+
     @Query("DELETE FROM chunks WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: Long)
 }

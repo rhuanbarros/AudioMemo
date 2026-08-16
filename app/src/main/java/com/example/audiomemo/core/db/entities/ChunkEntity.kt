@@ -24,5 +24,10 @@ data class ChunkEntity(
     val chunkIndex: Int,
     val filePath: String,
     val status: ChunkStatus,
-    val overlapMs: Int = 0
+    val overlapMs: Int = 0,
+    /**
+     * Tracks the chunk's upload to Supabase Storage — independent of [status], which belongs
+     * exclusively to the Whisper transcription pipeline (see am1-2 story / RULE ZERO wiki entry).
+     */
+    val supabaseUploadStatus: ChunkStatus = ChunkStatus.PENDING
 )
