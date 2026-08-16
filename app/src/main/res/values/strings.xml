@@ -31,9 +31,23 @@
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_section_general">General</string>
     <string name="settings_appearance">Appearance</string>
+    <string name="settings_cloud_sync">Cloud Sync</string>
     <string name="settings_rate_app">Rate App</string>
     <string name="settings_privacy_policy">Privacy Policy</string>
     <string name="settings_version">Version</string>
+
+    <!-- Cloud Sync -->
+    <string name="cloudsync_title">Cloud Sync</string>
+    <string name="cloudsync_subtitle">Sign in to sync your recordings</string>
+    <string name="cloudsync_email_label">Email</string>
+    <string name="cloudsync_password_label">Password</string>
+    <string name="cloudsync_save_button">Save</string>
+    <string name="cloudsync_connected_title">Connected</string>
+    <string name="cloudsync_connected_body">Your account is signed in. Recordings can sync to the cloud.</string>
+    <string name="cloudsync_success_message">Signed in successfully</string>
+    <string name="cloudsync_error_invalid_credentials">Incorrect email or password.</string>
+    <string name="cloudsync_error_network">No internet connection. Check your network and try again.</string>
+    <string name="cloudsync_error_unknown">Something went wrong. Please try again.</string>
 
     <!-- Meetings Dashboard -->
     <string name="meetings_title">Meetings</string>

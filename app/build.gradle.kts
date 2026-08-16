@@ -15,6 +15,8 @@ if (localPropertiesFile.exists()) {
     localProperties.load(FileInputStream(localPropertiesFile))
 }
 val openAiApiKey: String = localProperties.getProperty("OPENAI_API_KEY") ?: ""
+val supabaseUrl: String = localProperties.getProperty("SUPABASE_URL") ?: ""
+val supabaseAnonKey: String = localProperties.getProperty("SUPABASE_ANON_KEY") ?: ""
 
 android {
     namespace = "com.example.audiomemo"
@@ -27,6 +29,8 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "OPENAI_API_KEY", "\"$openAiApiKey\"")
+        buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -119,6 +123,10 @@ dependencies {
     // DataStore
     implementation(libs.datastore.preferences)
 
+    // Supabase Auth (login persistente — ver am1-1)
+    implementation(libs.supabase.auth.kt)
+    implementation(libs.ktor.client.android)
+
     // OkHttp Logging (debug only)
     debugImplementation(libs.okhttp.logging.interceptor)
 
@@ -126,6 +134,7 @@ dependencies {
     testImplementation(libs.kotest.property)
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.work.testing)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

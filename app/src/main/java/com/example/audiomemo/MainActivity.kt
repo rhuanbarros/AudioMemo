@@ -19,6 +19,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.audiomemo.core.preferences.AccentColor
 import com.example.audiomemo.core.preferences.ThemeMode
+import com.example.audiomemo.features.cloudsync.ui.CloudSyncSettingsScreen
 import com.example.audiomemo.features.home.ui.HomeScreen
 import com.example.audiomemo.features.meetings.ui.MeetingDetailsScreen
 import com.example.audiomemo.features.meetings.ui.MeetingsDashboardScreen
@@ -101,7 +102,15 @@ private fun AudioMemoApp(
                         },
                         onNavigateToAppearances = {
                             navController.navigate("appearances")
+                        },
+                        onNavigateToCloudSync = {
+                            navController.navigate("cloud_sync_settings")
                         }
+                    )
+                }
+                composable("cloud_sync_settings") {
+                    CloudSyncSettingsScreen(
+                        onNavigateBack = { navController.popBackStack() }
                     )
                 }
                 composable("meetings") {

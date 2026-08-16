@@ -1,5 +1,7 @@
 package com.example.audiomemo.di
 
+import com.example.audiomemo.features.cloudsync.data.SupabaseAuthRepositoryImpl
+import com.example.audiomemo.features.cloudsync.domain.SupabaseAuthRepository
 import com.example.audiomemo.features.home.data.HomeRepositoryImpl
 import com.example.audiomemo.features.home.domain.HomeRepository
 import com.example.audiomemo.features.summary.data.repository.SummaryRepositoryImpl
@@ -39,4 +41,8 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindHomeRepository(impl: HomeRepositoryImpl): HomeRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindSupabaseAuthRepository(impl: SupabaseAuthRepositoryImpl): SupabaseAuthRepository
 }

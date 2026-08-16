@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
@@ -52,7 +53,8 @@ import com.example.audiomemo.ui.theme.AudioMemoTheme
 fun SettingsScreen(
     onNavigateToHome: () -> Unit = {},
     onNavigateToMeetings: () -> Unit = {},
-    onNavigateToAppearances: () -> Unit = {}
+    onNavigateToAppearances: () -> Unit = {},
+    onNavigateToCloudSync: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -109,6 +111,15 @@ fun SettingsScreen(
             }
             item {
                 SettingsGroup {
+                    SettingsRow(
+                        icon = Icons.Default.CloudSync,
+                        label = stringResource(R.string.settings_cloud_sync),
+                        onClick = onNavigateToCloudSync
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(start = 52.dp)
+                    )
                     SettingsRow(
                         icon = Icons.Default.Star,
                         label = stringResource(R.string.settings_rate_app),
