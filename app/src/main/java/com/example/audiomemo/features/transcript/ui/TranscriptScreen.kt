@@ -83,6 +83,7 @@ import com.example.audiomemo.ui.theme.AudioMemoTheme
 import com.example.audiomemo.ui.theme.RecordingRed
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
