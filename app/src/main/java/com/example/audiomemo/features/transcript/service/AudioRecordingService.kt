@@ -16,6 +16,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.example.audiomemo.core.logging.AppEventLogger
 import com.example.audiomemo.core.logging.LogCategory
+import com.example.audiomemo.core.preferences.AppPreferencesRepository
 import com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker
 import com.example.audiomemo.features.transcript.data.worker.UploadPreferences
 import com.example.audiomemo.data.db.dao.ChunkDao
@@ -37,10 +38,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -52,6 +55,14 @@ class AudioRecordingService : Service() {
         const val ACTION_STOP = "com.example.audiomemo.action.STOP_RECORDING"
         const val ACTION_RESUME = "com.example.audiomemo.action.RESUME_RECORDING"
         private const val TAG = "AudioRecordingService"
+
+        /**
+         * How often [heartbeatJob] writes [AppPreferencesRepository.recordHeartbeat] while
+         * recording (am3-2, FR2). Deliberately independent of the 100ms amplitude-sampling loop
+         * already running in [AudioRecorderManager] — writing to DataStore at that frequency
+         * would be expensive; this is a separate, much lighter ticker.
+         */
+        private const val HEARTBEAT_INTERVAL_MS = 30_000L
 
         /**
          * Builds the exact [OneTimeWorkRequest] [enqueueSupabaseUpload] passes to `WorkManager`.
@@ -87,12 +98,20 @@ class AudioRecordingService : Service() {
     @Inject lateinit var sessionDao: SessionDao
     @Inject lateinit var chunkDao: ChunkDao
     @Inject lateinit var appEventLogger: AppEventLogger
+    @Inject lateinit var appPreferencesRepository: AppPreferencesRepository
 
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** Tracks the most recent chunk-save job so we can await it before enqueuing transcription. */
     private var lastChunkSaveJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Periodic "still alive" ticker (am3-2, FR2) — cancelled implicitly by `serviceScope.cancel()`
+     * in [onDestroy] along with everything else launched in [serviceScope]; no separate cancel
+     * needed.
+     */
+    private var heartbeatJob: kotlinx.coroutines.Job? = null
 
     private lateinit var recorder: AudioRecorderManager
     private lateinit var interruptionManager: AudioInterruptionManager
@@ -222,6 +241,41 @@ class AudioRecordingService : Service() {
             val sessionId = sessionStateManager.startSession()
             _currentSessionId.value = sessionId
             enqueueFinalizationWorker(sessionId)
+        }
+
+        // am3-2 (FR2): record the owner's intent so RecordingWatchdogWorker (and, post-reboot,
+        // the am3-3 boot receiver) know recording should be running. Only ever flipped back to
+        // false by an explicit stop (stopRecordingCleanly) — never by an always-on mechanism.
+        // Blocking on purpose (code review, am3-2): a fire-and-forget serviceScope.launch here
+        // raced against later teardown on the stop path; a single DataStore edit is fast, and
+        // correctness (the write actually lands before we move on) matters more than the tiny
+        // blocking cost at start.
+        runBlocking { appPreferencesRepository.setRecordingShouldBeActive(true) }
+
+        // am3-2 (FR2): lightweight liveness ticker, independent of the 100ms amplitude loop.
+        // Written immediately, then every HEARTBEAT_INTERVAL_MS, so the watchdog can tell a
+        // healthy session apart from one whose process died without onDestroy ever running.
+        // Cancel any previous job first (code review, am3-2): defensive-only today (the
+        // duplicate-start guard above already prevents re-entry here), but cheap insurance
+        // against a leaked/duplicated ticker if that guard ever changes.
+        heartbeatJob?.cancel()
+        heartbeatJob = serviceScope.launch {
+            while (true) {
+                // A single failed write (e.g. a transient DataStore IOException) must never
+                // permanently kill the ticker for the rest of the session — that would starve
+                // the watchdog of heartbeats and cause it to spuriously restart a perfectly
+                // healthy service every 15 minutes (code review, am3-2). CancellationException
+                // is deliberately rethrown, never swallowed here — this loop must still stop
+                // promptly when serviceScope.cancel() fires in onDestroy.
+                try {
+                    appPreferencesRepository.recordHeartbeat()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to record heartbeat, will retry next tick", e)
+                }
+                delay(HEARTBEAT_INTERVAL_MS)
+            }
         }
 
         recorder.startRecording()
@@ -482,6 +536,18 @@ class AudioRecordingService : Service() {
             cancelFinalizationWorker(sessionId)
             enqueueTranscriptionChain(sessionId)
         }
+        // am3-2 (FR2): this is the only place the owner's "should be recording" intent is
+        // cleared — the explicit stop path (button press or ACTION_STOP intent, which routes
+        // here). Automatic safety stops (battery/storage/permission/hardware) deliberately leave
+        // the intent as-is, so the watchdog can resume recording once the transient condition
+        // clears — only an explicit stop counts as "the owner doesn't want this running anymore".
+        // Blocking on purpose (code review, am3-2, CRITICAL): this used to be a fire-and-forget
+        // serviceScope.launch racing against stopSelf()/onDestroy's serviceScope.cancel() right
+        // below — a real race where the write could get cancelled before it landed, leaving
+        // recordingShouldBeActive stuck true after an explicit stop and letting the watchdog
+        // wrongly resurrect a session the owner explicitly stopped. Must complete before
+        // stopSelf() is called, not concurrently with it.
+        runBlocking { appPreferencesRepository.setRecordingShouldBeActive(false) }
         stopSelf()
     }
 
