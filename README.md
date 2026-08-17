@@ -67,6 +67,7 @@ The app requires the following permissions to function correctly:
 | `READ_PHONE_STATE` | Detect incoming / active calls to pause recording |
 | `MODIFY_AUDIO_SETTINGS` | Start Bluetooth SCO for headset microphone support |
 | `BLUETOOTH` | Bluetooth headset detection (API ≤ 30) |
+| `RECEIVE_BOOT_COMPLETED` | Auto-restart recording after a device reboot, if it was active before shutdown (see "Known Behavior" below) |
 
 ## Interruption Handling
 
@@ -98,6 +99,19 @@ AudioMemo is built to survive all common audio interruptions during a recording 
 ### Pause flag logic
 
 Multiple interruptions can overlap (e.g., a phone call arrives while audio focus is also lost). `AudioInterruptionManager` tracks three independent boolean flags — `pausedForCall`, `pausedForFocus`, and `pausedForMicMute` — and only calls `onResumeRequested()` when **all three** are clear. A fourth flag, `isMediaButtonPaused` in `AudioRecordingService`, tracks user-initiated headset pauses separately; interruption resumes will not restart the recorder while this flag is set.
+
+## Known Behavior
+
+- **Auto-start after reboot requires one manual launch first.** `BootCompletedReceiver` restarts
+  recording automatically after a device reboot, but only when it was already active before the
+  shutdown (`recordingShouldBeActive` preference). Since Android 3.1, the system does **not**
+  deliver `BOOT_COMPLETED` to a freshly installed app's manifest-registered receiver until the
+  user has opened the app manually at least once — this is expected platform behavior, not a bug,
+  and there is no app-level workaround for it. In practice: after a fresh install (or a
+  reinstall), open the app once before relying on auto-start-after-reboot. (This is a separate,
+  older restriction from Android 12's background-foreground-service-start limitation — the one the
+  receiver's own `IllegalStateException`/`SecurityException` handling guards against once it *is*
+  running.)
 
 ## Architecture Highlights
 

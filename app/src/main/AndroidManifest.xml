@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <!-- Required for startBluetoothSco() and audio routing -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- am3-3 (FR3): auto-restart recording after a device reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".AudioMemoApplication"
@@ -35,6 +37,19 @@
             android:name=".features.transcript.service.AudioRecordingService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
+
+        <!--
+             am3-3 (FR3): android:exported="true" is required by the system for a receiver
+             registering an implicit system broadcast (BOOT_COMPLETED) on Android 12+, even
+             though no other app needs to invoke it directly.
+        -->
+        <receiver
+            android:name=".features.transcript.receiver.BootCompletedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

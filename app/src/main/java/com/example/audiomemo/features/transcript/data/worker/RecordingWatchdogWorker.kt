@@ -21,9 +21,18 @@ import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
 
+/**
+ * Shared Hilt entry point for reaching [AppPreferencesRepository]/[AppEventLogger] from Android
+ * components that can't get constructor injection from Hilt directly — `CoroutineWorker`s (like
+ * [RecordingWatchdogWorker] below) and a manifest-registered `BroadcastReceiver` (
+ * [com.example.audiomemo.features.transcript.receiver.BootCompletedReceiver], am3-3) both need
+ * exactly the same two accessors to decide whether [AudioRecordingService] needs (re)starting, so
+ * this single interface is shared between them instead of each declaring its own copy that then
+ * needs to be kept in sync by hand (code review, am3-3).
+ */
 @EntryPoint
 @InstallIn(SingletonComponent::class)
-interface RecordingWatchdogEntryPoint {
+interface RecordingRestartEntryPoint {
     fun appPreferencesRepository(): AppPreferencesRepository
     fun appEventLogger(): AppEventLogger
 }
@@ -110,7 +119,7 @@ class RecordingWatchdogWorker(
     override suspend fun doWork(): Result {
         val entryPoint = EntryPointAccessors.fromApplication(
             applicationContext,
-            RecordingWatchdogEntryPoint::class.java
+            RecordingRestartEntryPoint::class.java
         )
         val appPreferencesRepository = entryPoint.appPreferencesRepository()
         val appEventLogger = entryPoint.appEventLogger()
