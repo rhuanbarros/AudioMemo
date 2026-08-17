@@ -5,7 +5,7 @@ AudioMemo is a native Android application that records audio, transcribes it usi
 ## Features
 
 - **Audio Recording:** High-quality voice recording with a real-time audio wavelength visualization UI.
-- **Smart Chunking:** Automatically splits long audio recordings into manageable 30-second chunks and saves them to local storage.
+- **Smart Chunking:** Automatically splits long audio recordings into manageable 2-minute chunks and saves them to local storage.
 - **AI Transcription:** Integrates with OpenAI's `whisper-1` model to provide accurate transcriptions of recorded audio.
 - **Intelligent Summarization:** Uses OpenAI's `gpt-4o-mini` model to generate concise summaries from the transcriptions.
 - **Local Storage:** Securely stores audio chunks and transcriptions locally using Room Database.
@@ -76,7 +76,7 @@ AudioMemo is built to survive all common audio interruptions during a recording 
 |---|---|---|---|
 | **Process death** | ✅ Handled | `ChunkFinalizationWorker` (WorkManager) | A 15-second delayed WorkManager job is enqueued when recording starts. If the process dies before the user stops cleanly, the worker fires, marks all in-flight chunks `FAILED`, and re-queues `TranscriptRetryWorker` to retry uploads. |
 | **Network failure during upload** | ✅ Handled | `WhisperUploadWorker` + `TranscriptRetryWorker` | `WhisperUploadWorker` uses WorkManager's built-in retry with exponential back-off. `TranscriptRetryWorker` can also re-enqueue failed chunks on demand. |
-| **Long recordings** | ✅ Handled | 30-second chunking + Room | `AudioRecorderManager` splits audio into 30-second `.m4a` files. Each chunk is saved to Room and uploaded independently, so arbitrarily long sessions are supported without memory pressure. |
+| **Long recordings** | ✅ Handled | 2-minute chunking + Room | `AudioRecorderManager` splits audio into 2-minute `.m4a` files. Each chunk is saved to Room and uploaded independently, so arbitrarily long sessions are supported without memory pressure. |
 | **Audio focus loss** | ✅ Handled | `AudioInterruptionManager` | Requests `AUDIOFOCUS_GAIN` at start. On `AUDIOFOCUS_LOSS` / `AUDIOFOCUS_LOSS_TRANSIENT` / `AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK` → pauses recording and shows "Paused – Audio focus lost" notification. Resumes automatically on `AUDIOFOCUS_GAIN`. |
 | **Phone calls** | ✅ Handled | `AudioInterruptionManager` | Listens via `TelephonyCallback` (API 31+) or `PhoneStateListener` (< API 31). `CALL_STATE_RINGING` / `CALL_STATE_OFFHOOK` → pauses and shows "Paused – Phone call" notification. `CALL_STATE_IDLE` → resumes automatically. Requires `READ_PHONE_STATE` permission. |
 | **Android 14 foreground service type** | ✅ Handled | `AndroidManifest.xml` | `AudioRecordingService` is declared with `android:foregroundServiceType="microphone"` and the `FOREGROUND_SERVICE_MICROPHONE` permission, satisfying the Android 14 (API 34) requirement for microphone FGS. |

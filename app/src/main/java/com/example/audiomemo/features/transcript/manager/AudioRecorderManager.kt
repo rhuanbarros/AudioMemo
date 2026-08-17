@@ -17,8 +17,17 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class AudioRecorderManager(private val context: Context) {
+
+    companion object {
+        /** Target duration of a normal (non-interrupted) recording chunk. */
+        val CHUNK_DURATION_MS = TimeUnit.MINUTES.toMillis(2)
+
+        /** How often storage is re-checked while waiting for the next chunk rotation. */
+        val STORAGE_CHECK_INTERVAL_MS = TimeUnit.SECONDS.toMillis(15)
+    }
 
     private var mediaRecorder: MediaRecorder? = null
 
@@ -38,7 +47,7 @@ class AudioRecorderManager(private val context: Context) {
     var isRecording: Boolean = false
         private set
 
-    /** Called whenever a 15-second chunk is completed (rotation or pause/stop). */
+    /** Called whenever a chunk is completed (rotation or pause/stop). */
     var onChunkCompleted: ((File) -> Unit)? = null
 
     /** Called when storage drops below the minimum threshold during recording. */
@@ -97,14 +106,19 @@ class AudioRecorderManager(private val context: Context) {
             }
         }
         chunkJob = scope.launch {
+            var elapsed = 0L
             while (isActive) {
-                delay(15_000)
+                delay(STORAGE_CHECK_INTERVAL_MS)
+                elapsed += STORAGE_CHECK_INTERVAL_MS
                 if (!isActive) break
                 if (!StorageGuard.hasEnoughStorage(context.filesDir)) {
                     onStorageLow?.invoke()
                     break
                 }
-                startNewChunk()
+                if (elapsed >= CHUNK_DURATION_MS) {
+                    elapsed = 0L
+                    startNewChunk()
+                }
             }
         }
     }
