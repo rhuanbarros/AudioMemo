@@ -100,6 +100,20 @@ class AudioRecordingService : Service() {
          */
         internal fun computeChunkSizeKb(fileSizeBytes: Long): Long =
             if (fileSizeBytes <= 0L) 0L else (fileSizeBytes + 1023) / 1024
+
+        /**
+         * Pure FR9/FR10 decision: whether a just-finished chunk's [AudioRecorderManager.
+         * ChunkAmplitudeOutcome] should enqueue a Supabase upload at all. Extracted (code review,
+         * am4-2, patch 2) — this is the actual "never upload a silent chunk" behavior this story
+         * exists for, previously inline-only inside [onChunkCompleted]'s lambda with zero test
+         * coverage (unlike every other decision in this story, e.g.
+         * [AudioRecorderManager.evaluateChunkAmplitude]). `SILENT` is the only outcome that skips
+         * upload — `UNMEASURED` uploads normally (the safe default per the story's I/O matrix),
+         * same as `AUDIBLE`.
+         */
+        internal fun shouldEnqueueSupabaseUpload(
+            outcome: AudioRecorderManager.ChunkAmplitudeOutcome
+        ): Boolean = outcome != AudioRecorderManager.ChunkAmplitudeOutcome.SILENT
     }
 
     inner class LocalBinder : Binder() {
@@ -169,9 +183,13 @@ class AudioRecordingService : Service() {
         recorder = AudioRecorderManager(applicationContext)
         sessionStateManager = SessionStateManager(sessionDao, chunkDao)
 
-        recorder.onChunkCompleted = { file ->
+        recorder.onChunkCompleted = { file, amplitudeOutcome ->
             lastChunkSaveJob = serviceScope.launch {
-                val chunkId = sessionStateManager.saveChunk(file.absolutePath)
+                // am4-2 (FR9/FR10): a chunk whose amplitude never crossed the silence threshold
+                // during its whole recording is never enqueued for Supabase upload — the file is
+                // still saved locally exactly like any other chunk (see saveChunk's KDoc).
+                val wasSilent = amplitudeOutcome == AudioRecorderManager.ChunkAmplitudeOutcome.SILENT
+                val chunkId = sessionStateManager.saveChunk(file.absolutePath, wasSilent = wasSilent)
                 val sessionId = sessionStateManager.currentSessionId
                 if (chunkId > 0L && sessionId > 0L) {
                     // am4-1 (FR7): file size in KB alongside the chunk id, so the Logs screen
@@ -187,10 +205,33 @@ class AudioRecordingService : Service() {
                     // Each enqueue is isolated: a failure enqueuing one worker (e.g. WorkManager
                     // internals throwing) must never prevent the other from running — they are
                     // independent upload pipelines (Whisper vs Supabase) for the same chunk.
+                    // Whisper transcription is untouched by am4-2 — only the Supabase upload
+                    // (below) is skipped for a silent chunk, per this story's Code Map.
                     runCatching { enqueueChunkUpload(chunkId, sessionId) }
                         .onFailure { Log.w(TAG, "Failed to enqueue WhisperUploadWorker for chunk $chunkId", it) }
-                    runCatching { enqueueSupabaseUpload(chunkId, sessionId) }
-                        .onFailure { Log.w(TAG, "Failed to enqueue SupabaseUploadWorker for chunk $chunkId", it) }
+
+                    if (amplitudeOutcome == AudioRecorderManager.ChunkAmplitudeOutcome.UNMEASURED) {
+                        // am4-2 edge case: getMaxAmplitude() stayed at 0 for the whole chunk —
+                        // some devices/emulators don't support amplitude reads. Treated as
+                        // "couldn't measure", never as silence (safer default — see
+                        // AudioRecorderManager.ChunkAmplitudeOutcome's KDoc), but logged
+                        // distinctly from the silent-skip log below so this hardware/emulator
+                        // limitation stays visible on the Logs screen.
+                        appEventLogger.log(
+                            LogCategory.UPLOAD,
+                            "Chunk amplitude could not be measured (id=$chunkId) — upload proceeding normally for safety"
+                        )
+                    }
+
+                    // am4-2 (FR9/FR10), code review patch 2: the actual "never upload a silent
+                    // chunk" decision — extracted into shouldEnqueueSupabaseUpload (pure,
+                    // unit-tested) rather than inlined here, mirroring evaluateChunkAmplitude.
+                    if (!shouldEnqueueSupabaseUpload(amplitudeOutcome)) {
+                        appEventLogger.log(LogCategory.UPLOAD, "Chunk skipped: no audio detected (id=$chunkId)")
+                    } else {
+                        runCatching { enqueueSupabaseUpload(chunkId, sessionId) }
+                            .onFailure { Log.w(TAG, "Failed to enqueue SupabaseUploadWorker for chunk $chunkId", it) }
+                    }
                 } else {
                     appEventLogger.log(
                         LogCategory.RECORDING,

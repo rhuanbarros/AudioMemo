@@ -69,13 +69,25 @@ class SessionStateManager(
         } else -1L
     }
 
-    suspend fun saveChunk(filePath: String): Long = withContext(Dispatchers.IO) {
+    /**
+     * @param wasSilent (am4-2, FR9/FR10) true when the chunk's amplitude never crossed
+     *   [com.example.audiomemo.features.transcript.manager.AudioRecorderManager.Companion.SILENCE_AMPLITUDE_THRESHOLD]
+     *   during its whole recording. Persists `supabaseUploadStatus = SILENT` instead of the normal
+     *   `PENDING` — a terminal state no existing supabaseUploadStatus-based sweep/query ever picks
+     *   up (see [ChunkStatus.SILENT]'s KDoc for why this is a dedicated value, never `DONE`) — so
+     *   the chunk is never enqueued for Supabase upload, while its local file and Whisper `status`
+     *   (unaffected by this parameter) follow the exact same path as any other finished chunk.
+     */
+    suspend fun saveChunk(filePath: String, wasSilent: Boolean = false): Long = withContext(Dispatchers.IO) {
         if (currentSessionId > 0) {
+            val supabaseUploadStatus = if (wasSilent) ChunkStatus.SILENT else ChunkStatus.PENDING
             val existing = chunkDao.getChunkByFilePathAndSession(filePath, currentSessionId)
             if (existing != null) {
                 // Normal path (am3-5): update the RECORDING row markChunkStarted already created
                 // for this exact filePath instead of inserting a second row for the same chunk.
-                chunkDao.update(existing.copy(status = ChunkStatus.PENDING))
+                chunkDao.update(
+                    existing.copy(status = ChunkStatus.PENDING, supabaseUploadStatus = supabaseUploadStatus)
+                )
                 existing.id
             } else {
                 // Defensive fallback, should not happen in the normal flow (markChunkStarted is
@@ -86,7 +98,8 @@ class SessionStateManager(
                         sessionId = currentSessionId,
                         chunkIndex = chunkIndex++,
                         filePath = filePath,
-                        status = ChunkStatus.PENDING
+                        status = ChunkStatus.PENDING,
+                        supabaseUploadStatus = supabaseUploadStatus
                     )
                 )
             }

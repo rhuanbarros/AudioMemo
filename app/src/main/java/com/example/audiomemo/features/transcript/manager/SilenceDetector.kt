@@ -27,6 +27,14 @@ class SilenceDetector(
     private val onPermissionRevoked: () -> Unit = {}
 ) {
     companion object {
+        /**
+         * Deliberately independent of [AudioRecorderManager.SILENCE_AMPLITUDE_THRESHOLD] (code
+         * review, am4-2, patch 4): both read the same `MediaRecorder.getMaxAmplitude()` signal but
+         * serve different purposes — this one drives a live, user-facing "No audio detected"
+         * warning *during* recording; `AudioRecorderManager`'s decides whether a whole *finished*
+         * chunk skips Supabase upload (FR9/FR10). Different values, not a bug — never unify them
+         * without a separate, deliberate design decision.
+         */
         private const val SILENCE_THRESHOLD = 500
         private const val SILENCE_TIMEOUT_MS = 10_000L
         private const val CHECK_INTERVAL_MS = 1_000L

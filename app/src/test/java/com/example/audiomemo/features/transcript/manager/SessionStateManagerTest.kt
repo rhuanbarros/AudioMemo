@@ -218,4 +218,63 @@ class SessionStateManagerTest : StringSpec({
             }
         }
     }
+
+    // am4-2, FR9/FR10: saveChunk(wasSilent = true) must persist supabaseUploadStatus = SILENT
+    // (never DONE — see ChunkStatus.SILENT's KDoc for why reusing DONE would be unsafe here),
+    // while leaving the Whisper-only status column on the normal PENDING path.
+
+    "saveChunk(wasSilent = true) persists supabaseUploadStatus = SILENT on the normal update path" {
+        runTest {
+            val chunkDao = FakeChunkDao()
+            val manager = SessionStateManager(FakeSessionDao(), chunkDao)
+            manager.startSession()
+
+            val filePath = "/data/chunks/audio_chunk_silent.m4a"
+            manager.markChunkStarted(filePath)
+            manager.saveChunk(filePath, wasSilent = true)
+
+            val row = chunkDao.rows.single()
+            check(row.supabaseUploadStatus == ChunkStatus.SILENT) {
+                "expected supabaseUploadStatus = SILENT for a silent chunk, got ${row.supabaseUploadStatus}"
+            }
+            check(row.status == ChunkStatus.PENDING) {
+                "the Whisper-only status column must stay on the normal PENDING path regardless " +
+                    "of wasSilent — am4-2 only changes the Supabase upload leg"
+            }
+        }
+    }
+
+    "saveChunk(wasSilent = true) persists supabaseUploadStatus = SILENT on the defensive insert fallback path" {
+        runTest {
+            val chunkDao = FakeChunkDao()
+            val manager = SessionStateManager(FakeSessionDao(), chunkDao)
+            manager.startSession()
+
+            // markChunkStarted never called for this filePath — exercises the fallback insert.
+            manager.saveChunk("/data/chunks/audio_chunk_silent_orphan.m4a", wasSilent = true)
+
+            val row = chunkDao.rows.single()
+            check(row.supabaseUploadStatus == ChunkStatus.SILENT) {
+                "expected supabaseUploadStatus = SILENT via the fallback insert path too, got " +
+                    "${row.supabaseUploadStatus}"
+            }
+        }
+    }
+
+    "saveChunk defaults to wasSilent = false, preserving the pre-am4-2 supabaseUploadStatus = PENDING behavior" {
+        runTest {
+            val chunkDao = FakeChunkDao()
+            val manager = SessionStateManager(FakeSessionDao(), chunkDao)
+            manager.startSession()
+
+            val filePath = "/data/chunks/audio_chunk_normal.m4a"
+            manager.markChunkStarted(filePath)
+            manager.saveChunk(filePath)
+
+            check(chunkDao.rows.single().supabaseUploadStatus == ChunkStatus.PENDING) {
+                "a normal (non-silent) chunk must still end up supabaseUploadStatus = PENDING, " +
+                    "ready for the existing Supabase upload pipeline"
+            }
+        }
+    }
 })
