@@ -36,6 +36,10 @@
     <string name="settings_privacy_policy">Privacy Policy</string>
     <string name="settings_version">Version</string>
     <string name="settings_logs">Logs</string>
+    <string name="settings_battery_optimization">Battery Optimization</string>
+    <string name="settings_battery_optimization_explanation">Exempt AudioMemo from battery optimization so recording keeps running in the background without interruption.</string>
+    <string name="settings_battery_optimization_granted_body">AudioMemo is exempt from battery optimization.</string>
+    <string name="settings_battery_optimization_status_granted">Granted</string>
 
     <!-- Logs -->
     <string name="logs_title">Logs</string>
