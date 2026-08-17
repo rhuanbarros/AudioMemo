@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.audiomemo.BuildConfig
+import com.example.audiomemo.core.logging.AppEventLogger
+import com.example.audiomemo.core.logging.LogCategory
 import com.example.audiomemo.data.db.dao.ChunkDao
 import com.example.audiomemo.data.db.dao.TranscriptDao
 import com.example.audiomemo.data.db.entities.TranscriptEntity
@@ -24,6 +26,7 @@ interface WhisperUploadEntryPoint {
     fun chunkDao(): ChunkDao
     fun transcriptDao(): TranscriptDao
     fun openAIApiService(): OpenAIApiService
+    fun appEventLogger(): AppEventLogger
 }
 
 /**
@@ -54,9 +57,13 @@ class WhisperUploadWorker(
         val chunkDao = ep.chunkDao()
         val transcriptDao = ep.transcriptDao()
         val apiService = ep.openAIApiService()
+        val appEventLogger = ep.appEventLogger()
 
         val chunk = chunkDao.getChunksForSessionOnce(sessionId)
-            .firstOrNull { it.id == chunkId } ?: return Result.failure()
+            .firstOrNull { it.id == chunkId } ?: run {
+                appEventLogger.log(LogCategory.UPLOAD, "Whisper upload failed: chunk $chunkId not found")
+                return Result.failure()
+            }
 
         if (chunk.status == ChunkStatus.DONE) return Result.success()
 
@@ -66,6 +73,7 @@ class WhisperUploadWorker(
             val file = File(chunk.filePath)
             if (!file.exists()) {
                 chunkDao.updateStatus(chunkId, ChunkStatus.FAILED)
+                appEventLogger.log(LogCategory.UPLOAD, "Whisper upload failed: local file missing (chunk=$chunkId)")
                 return Result.failure()
             }
 
@@ -88,10 +96,20 @@ class WhisperUploadWorker(
                 )
             )
             chunkDao.updateStatus(chunkId, ChunkStatus.DONE)
+            appEventLogger.log(LogCategory.UPLOAD, "Whisper upload succeeded (chunk=$chunkId)")
             Result.success()
         } catch (e: Exception) {
             chunkDao.updateStatus(chunkId, ChunkStatus.FAILED)
-            if (runAttemptCount < 3) Result.retry() else Result.failure()
+            if (runAttemptCount < 3) {
+                appEventLogger.log(
+                    LogCategory.UPLOAD,
+                    "Whisper upload failed, retrying (chunk=$chunkId, attempt=$runAttemptCount)"
+                )
+                Result.retry()
+            } else {
+                appEventLogger.log(LogCategory.UPLOAD, "Whisper upload failed permanently (chunk=$chunkId)")
+                Result.failure()
+            }
         }
     }
 }

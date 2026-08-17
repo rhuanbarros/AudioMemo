@@ -21,6 +21,7 @@ import com.example.audiomemo.core.preferences.AccentColor
 import com.example.audiomemo.core.preferences.ThemeMode
 import com.example.audiomemo.features.cloudsync.ui.CloudSyncSettingsScreen
 import com.example.audiomemo.features.home.ui.HomeScreen
+import com.example.audiomemo.features.logs.ui.LogsScreen
 import com.example.audiomemo.features.meetings.ui.MeetingDetailsScreen
 import com.example.audiomemo.features.meetings.ui.MeetingsDashboardScreen
 import com.example.audiomemo.features.settings.ui.AppearanceScreen
@@ -105,11 +106,19 @@ private fun AudioMemoApp(
                         },
                         onNavigateToCloudSync = {
                             navController.navigate("cloud_sync_settings")
+                        },
+                        onNavigateToLogs = {
+                            navController.navigate("logs")
                         }
                     )
                 }
                 composable("cloud_sync_settings") {
                     CloudSyncSettingsScreen(
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                }
+                composable("logs") {
+                    LogsScreen(
                         onNavigateBack = { navController.popBackStack() }
                     )
                 }

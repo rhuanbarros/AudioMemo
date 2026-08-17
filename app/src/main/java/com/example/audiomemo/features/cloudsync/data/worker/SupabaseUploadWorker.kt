@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.example.audiomemo.core.logging.AppEventLogger
+import com.example.audiomemo.core.logging.LogCategory
 import com.example.audiomemo.data.db.dao.ChunkDao
 import com.example.audiomemo.features.cloudsync.data.SupabaseStorageRepository
 import com.example.audiomemo.features.transcript.domain.model.ChunkStatus
@@ -21,6 +23,7 @@ interface SupabaseUploadEntryPoint {
     fun chunkDao(): ChunkDao
     fun supabaseStorageRepository(): SupabaseStorageRepository
     fun supabaseClient(): SupabaseClient
+    fun appEventLogger(): AppEventLogger
 }
 
 /**
@@ -120,9 +123,13 @@ class SupabaseUploadWorker(
         val chunkDao = ep.chunkDao()
         val storageRepository = ep.supabaseStorageRepository()
         val supabaseClient = ep.supabaseClient()
+        val appEventLogger = ep.appEventLogger()
 
         val chunk = chunkDao.getChunksForSessionOnce(sessionId)
-            .firstOrNull { it.id == chunkId } ?: return Result.failure()
+            .firstOrNull { it.id == chunkId } ?: run {
+                appEventLogger.log(LogCategory.UPLOAD, "Supabase upload failed: chunk $chunkId not found")
+                return Result.failure()
+            }
 
         // Idempotent: never re-upload a chunk already confirmed DONE.
         if (chunk.supabaseUploadStatus == ChunkStatus.DONE) return Result.success()
@@ -138,13 +145,17 @@ class SupabaseUploadWorker(
         // next time that specific chunk's finish event fires again, which it won't) — out of
         // scope here per the am1-3 story; see PRD FR2 (login persists) for why this is expected
         // to be rare in practice once login succeeds once.
-        if (supabaseClient.auth.currentSessionOrNull() == null) return Result.failure()
+        if (supabaseClient.auth.currentSessionOrNull() == null) {
+            appEventLogger.log(LogCategory.UPLOAD, "Supabase upload skipped: not signed in (chunk=$chunkId)")
+            return Result.failure()
+        }
 
         chunkDao.updateSupabaseUploadStatus(chunkId, ChunkStatus.UPLOADING)
 
         val file = File(chunk.filePath)
         if (!file.exists()) {
             chunkDao.updateSupabaseUploadStatus(chunkId, ChunkStatus.FAILED)
+            appEventLogger.log(LogCategory.UPLOAD, "Supabase upload failed: local file missing (chunk=$chunkId)")
             return Result.failure()
         }
 
@@ -163,6 +174,18 @@ class SupabaseUploadWorker(
                 "Failed to delete local file for chunk $chunkId after confirmed " +
                     "Supabase upload: ${file.path}"
             )
+        }
+
+        when (decision.resultKind) {
+            UploadWorkerResultKind.SUCCESS ->
+                appEventLogger.log(LogCategory.UPLOAD, "Supabase upload succeeded (chunk=$chunkId)")
+            UploadWorkerResultKind.RETRY ->
+                appEventLogger.log(
+                    LogCategory.UPLOAD,
+                    "Supabase upload failed, retrying (chunk=$chunkId, attempt=$runAttemptCount)"
+                )
+            UploadWorkerResultKind.FAILURE ->
+                appEventLogger.log(LogCategory.UPLOAD, "Supabase upload failed permanently (chunk=$chunkId)")
         }
 
         return when (decision.resultKind) {

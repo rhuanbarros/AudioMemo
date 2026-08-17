@@ -35,6 +35,14 @@
     <string name="settings_rate_app">Rate App</string>
     <string name="settings_privacy_policy">Privacy Policy</string>
     <string name="settings_version">Version</string>
+    <string name="settings_logs">Logs</string>
+
+    <!-- Logs -->
+    <string name="logs_title">Logs</string>
+    <string name="logs_empty">No events yet</string>
+    <string name="logs_category_recording">Recording</string>
+    <string name="logs_category_upload">Upload</string>
+    <string name="logs_category_interruption">Interruption</string>
 
     <!-- Cloud Sync -->
     <string name="cloudsync_title">Cloud Sync</string>

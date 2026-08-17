@@ -14,6 +14,8 @@ import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.example.audiomemo.core.logging.AppEventLogger
+import com.example.audiomemo.core.logging.LogCategory
 import com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker
 import com.example.audiomemo.features.transcript.data.worker.UploadPreferences
 import com.example.audiomemo.data.db.dao.ChunkDao
@@ -84,6 +86,7 @@ class AudioRecordingService : Service() {
 
     @Inject lateinit var sessionDao: SessionDao
     @Inject lateinit var chunkDao: ChunkDao
+    @Inject lateinit var appEventLogger: AppEventLogger
 
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -141,6 +144,7 @@ class AudioRecordingService : Service() {
                 val chunkId = sessionStateManager.saveChunk(file.absolutePath)
                 val sessionId = sessionStateManager.currentSessionId
                 if (chunkId > 0L && sessionId > 0L) {
+                    appEventLogger.log(LogCategory.RECORDING, "Chunk finalized (id=$chunkId)")
                     // Each enqueue is isolated: a failure enqueuing one worker (e.g. WorkManager
                     // internals throwing) must never prevent the other from running — they are
                     // independent upload pipelines (Whisper vs Supabase) for the same chunk.
@@ -148,6 +152,11 @@ class AudioRecordingService : Service() {
                         .onFailure { Log.w(TAG, "Failed to enqueue WhisperUploadWorker for chunk $chunkId", it) }
                     runCatching { enqueueSupabaseUpload(chunkId, sessionId) }
                         .onFailure { Log.w(TAG, "Failed to enqueue SupabaseUploadWorker for chunk $chunkId", it) }
+                } else {
+                    appEventLogger.log(
+                        LogCategory.RECORDING,
+                        "Chunk finalize failed: invalid chunkId=$chunkId sessionId=$sessionId"
+                    )
                 }
             }
         }
@@ -202,6 +211,7 @@ class AudioRecordingService : Service() {
 
         // ── Start recording ────────────────────────────────────────────────────
         isRecordingActive = true
+        appEventLogger.log(LogCategory.RECORDING, "Recording started")
         NotificationHelper.createNotificationChannel(this)
         startForeground(
             NotificationHelper.NOTIFICATION_ID,
@@ -242,6 +252,7 @@ class AudioRecordingService : Service() {
 
     private fun handleInterruptionPause(reason: AudioInterruptionManager.PauseReason) {
         if (_isStopped.value) return
+        appEventLogger.log(LogCategory.INTERRUPTION, "Recording paused: $reason")
         recorder.pauseRecording()
         silenceDetector.stop()
         serviceScope.launch { sessionStateManager.pauseSession() }
@@ -268,6 +279,10 @@ class AudioRecordingService : Service() {
         // If the user has manually paused via headset button, keep the recorder paused
         // and show the media-button pause notification instead of resuming.
         if (isMediaButtonPaused) {
+            appEventLogger.log(
+                LogCategory.INTERRUPTION,
+                "Interruption cleared, but recording stays paused (media button)"
+            )
             NotificationHelper.updateNotification(
                 this,
                 NotificationHelper.buildPausedMediaButtonNotification(
@@ -276,6 +291,7 @@ class AudioRecordingService : Service() {
             )
             return
         }
+        appEventLogger.log(LogCategory.INTERRUPTION, "Recording resumed")
         recorder.resumeRecording()
         silenceDetector.reset()
         silenceDetector.start()
@@ -326,6 +342,7 @@ class AudioRecordingService : Service() {
 
     private fun handleSourceChanged(sourceName: String) {
         if (_isStopped.value) return
+        appEventLogger.log(LogCategory.INTERRUPTION, "Audio source changed to $sourceName")
         NotificationHelper.updateNotification(
             this,
             NotificationHelper.buildMicSourceChangedNotification(this, sourceName, stopPendingIntent())
@@ -352,6 +369,7 @@ class AudioRecordingService : Service() {
     }
 
     private fun handleBatteryLow() {
+        appEventLogger.log(LogCategory.INTERRUPTION, "Battery low — recording stopped")
         recorder.stopRecording()
         silenceDetector.stop()
         interruptionManager.stop()
@@ -375,6 +393,7 @@ class AudioRecordingService : Service() {
     }
 
     private fun handleLowStorage() {
+        appEventLogger.log(LogCategory.INTERRUPTION, "Low storage — recording stopped")
         recorder.stopRecording()
         silenceDetector.stop()
         interruptionManager.stop()
@@ -398,6 +417,7 @@ class AudioRecordingService : Service() {
     }
 
     private fun handlePermissionRevoked() {
+        appEventLogger.log(LogCategory.INTERRUPTION, "Permission revoked — recording stopped")
         recorder.stopRecording()
         silenceDetector.stop()
         interruptionManager.stop()
@@ -421,6 +441,7 @@ class AudioRecordingService : Service() {
     }
 
     private fun handleHardwareError() {
+        appEventLogger.log(LogCategory.INTERRUPTION, "Hardware error — recording stopped")
         silenceDetector.stop()
         interruptionManager.stop()
         batteryGuard.stop()
@@ -446,6 +467,7 @@ class AudioRecordingService : Service() {
     private fun stopRecordingCleanly() {
         if (_isStopped.value) return
         _isStopped.value = true
+        appEventLogger.log(LogCategory.RECORDING, "Recording stopped")
         stopForeground(STOP_FOREGROUND_REMOVE)
         recorder.stopRecording()
         silenceDetector.stop()
@@ -488,7 +510,14 @@ class AudioRecordingService : Service() {
     }
 
     private fun enqueueChunkUpload(chunkId: Long, sessionId: Long) {
-        if (chunkId <= 0L || sessionId <= 0L) return
+        if (chunkId <= 0L || sessionId <= 0L) {
+            appEventLogger.log(
+                LogCategory.UPLOAD,
+                "Whisper upload not enqueued: invalid chunkId=$chunkId sessionId=$sessionId"
+            )
+            return
+        }
+        appEventLogger.log(LogCategory.UPLOAD, "Whisper upload enqueued (chunk=$chunkId)")
         val constraints = UploadPreferences.networkConstraints(applicationContext)
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             "${WhisperUploadWorker.WORK_NAME_PREFIX}$chunkId",
@@ -512,7 +541,14 @@ class AudioRecordingService : Service() {
      * the user's Whisper upload preference.
      */
     private fun enqueueSupabaseUpload(chunkId: Long, sessionId: Long) {
-        if (chunkId <= 0L || sessionId <= 0L) return
+        if (chunkId <= 0L || sessionId <= 0L) {
+            appEventLogger.log(
+                LogCategory.UPLOAD,
+                "Supabase upload not enqueued: invalid chunkId=$chunkId sessionId=$sessionId"
+            )
+            return
+        }
+        appEventLogger.log(LogCategory.UPLOAD, "Supabase upload enqueued (chunk=$chunkId)")
         WorkManager.getInstance(applicationContext).enqueueUniqueWork(
             supabaseUploadWorkName(chunkId),
             ExistingWorkPolicy.KEEP,
