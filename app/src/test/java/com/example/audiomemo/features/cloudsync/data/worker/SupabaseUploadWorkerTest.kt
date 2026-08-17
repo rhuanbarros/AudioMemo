@@ -72,4 +72,36 @@ class SupabaseUploadWorkerTest : StringSpec({
             "expected FAILURE once runAttemptCount reaches the ceiling (mirrors runAttemptCount < 3)"
         }
     }
+
+    // am4-1, FR8: computeUploadLatencyMs is the single source of truth for the
+    // "enqueued -> confirmed" latency interpolated into the success log message.
+
+    "computeUploadLatencyMs returns the elapsed milliseconds between enqueue and confirmation" {
+        val latency = SupabaseUploadWorker.computeUploadLatencyMs(
+            enqueuedAtMs = 1_000L,
+            confirmedAtMs = 1_750L
+        )
+
+        check(latency == 750L) { "expected 750ms elapsed, got $latency" }
+    }
+
+    "computeUploadLatencyMs returns zero when enqueue and confirmation are simultaneous" {
+        val latency = SupabaseUploadWorker.computeUploadLatencyMs(
+            enqueuedAtMs = 5_000L,
+            confirmedAtMs = 5_000L
+        )
+
+        check(latency == 0L) { "expected 0ms elapsed, got $latency" }
+    }
+
+    "computeUploadLatencyMs never returns a negative value, even if confirmedAtMs precedes enqueuedAtMs" {
+        val latency = SupabaseUploadWorker.computeUploadLatencyMs(
+            enqueuedAtMs = 10_000L,
+            confirmedAtMs = 9_000L
+        )
+
+        check(latency == 0L) {
+            "a clock adjustment between the two reads must never surface as a negative latency: got $latency"
+        }
+    }
 })

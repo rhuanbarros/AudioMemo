@@ -189,8 +189,10 @@ private fun formatTimestamp(timestamp: Long): String =
 // ── Previews ──────────────────────────────────────────────────────────────────
 
 private val previewEvents = listOf(
-    LogEvent(System.currentTimeMillis(), LogCategory.UPLOAD, "Supabase upload enqueued (chunk=42)"),
-    LogEvent(System.currentTimeMillis() - 5_000, LogCategory.RECORDING, "Chunk finalized (id=42)"),
+    // am4-1: sizeKb/latencyMs reflected here so the preview stays representative of what
+    // LogsScreen actually renders (code review, am4-1, patch 6).
+    LogEvent(System.currentTimeMillis(), LogCategory.UPLOAD, "Supabase upload succeeded (chunk=42, latencyMs=843)"),
+    LogEvent(System.currentTimeMillis() - 5_000, LogCategory.RECORDING, "Chunk finalized (id=42, sizeKb=118)"),
     LogEvent(System.currentTimeMillis() - 12_000, LogCategory.INTERRUPTION, "Recording resumed"),
     LogEvent(System.currentTimeMillis() - 60_000, LogCategory.INTERRUPTION, "Recording paused: PHONE_CALL"),
     LogEvent(System.currentTimeMillis() - 120_000, LogCategory.RECORDING, "Recording started")

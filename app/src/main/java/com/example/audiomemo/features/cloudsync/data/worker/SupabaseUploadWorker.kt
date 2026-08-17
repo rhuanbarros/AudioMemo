@@ -79,6 +79,21 @@ class SupabaseUploadWorker(
         )
 
         /**
+         * Latency (ms) between "enqueued" and "confirmed", for the am4-1, FR8 log message on a
+         * successful upload. Pure and `Context`/`Log`-free (same rationale as
+         * [decideUploadOutcome]/[deleteConfirmedUploadFile] above) so it's unit-testable from
+         * plain-JVM `src/test`.
+         *
+         * [enqueuedAtMs] is an **approximation**: this project's `WorkRequest`/input `Data` has no
+         * existing enqueue-time field to read (checked against [KEY_CHUNK_ID]/[KEY_SESSION_ID]
+         * above), so [doWork] captures `System.currentTimeMillis()` at its own start and passes
+         * that in as the stand-in for "enqueued" (per this story's Code Map). `coerceAtLeast(0L)`
+         * guards against a negative value from any clock adjustment between the two reads.
+         */
+        internal fun computeUploadLatencyMs(enqueuedAtMs: Long, confirmedAtMs: Long): Long =
+            (confirmedAtMs - enqueuedAtMs).coerceAtLeast(0L)
+
+        /**
          * Pure decision for what happens after the Supabase upload attempt resolves (FR7/am1-3):
          * on success, the chunk becomes `DONE` and its local file is deleted; on failure, the
          * chunk becomes `FAILED` and the file is **never** touched, with the worker retrying up to
@@ -110,6 +125,9 @@ class SupabaseUploadWorker(
     }
 
     override suspend fun doWork(): Result {
+        // am4-1 (FR8): stand-in for "enqueued at" — see computeUploadLatencyMs's KDoc for why
+        // this is an approximation rather than the true enqueue timestamp.
+        val enqueuedAtMs = System.currentTimeMillis()
         val chunkId = inputData.getLong(KEY_CHUNK_ID, -1L)
         val sessionId = inputData.getLong(KEY_SESSION_ID, -1L)
         // Room's autogenerate ids start at 1 — 0 is never legitimate, same bound as
@@ -177,8 +195,13 @@ class SupabaseUploadWorker(
         }
 
         when (decision.resultKind) {
-            UploadWorkerResultKind.SUCCESS ->
-                appEventLogger.log(LogCategory.UPLOAD, "Supabase upload succeeded (chunk=$chunkId)")
+            UploadWorkerResultKind.SUCCESS -> {
+                val latencyMs = computeUploadLatencyMs(enqueuedAtMs, System.currentTimeMillis())
+                appEventLogger.log(
+                    LogCategory.UPLOAD,
+                    "Supabase upload succeeded (chunk=$chunkId, latencyMs=$latencyMs)"
+                )
+            }
             UploadWorkerResultKind.RETRY ->
                 appEventLogger.log(
                     LogCategory.UPLOAD,

@@ -89,6 +89,17 @@ class AudioRecordingService : Service() {
         /** The unique WorkManager work name [enqueueSupabaseUpload] enqueues under, for a given chunk. */
         internal fun supabaseUploadWorkName(chunkId: Long): String =
             "${SupabaseUploadWorker.WORK_NAME_PREFIX}$chunkId"
+
+        /**
+         * Chunk file size, in KB, for the "Chunk finalized" log message (am4-1, FR7). Ceiling-
+         * rounds (`+ 1023`) rather than floors — a genuinely tiny non-zero chunk (e.g. 500 bytes)
+         * must never report the same `sizeKb=0` as a truly empty file, which is exactly the
+         * failure case this field exists to make visible. Pure, `File`/`Context`-free `internal`
+         * function taking the raw byte count (not a `File`) so it's unit-testable from plain-JVM
+         * `src/test`, mirroring [SupabaseUploadWorker.computeUploadLatencyMs].
+         */
+        internal fun computeChunkSizeKb(fileSizeBytes: Long): Long =
+            if (fileSizeBytes <= 0L) 0L else (fileSizeBytes + 1023) / 1024
     }
 
     inner class LocalBinder : Binder() {
@@ -163,7 +174,16 @@ class AudioRecordingService : Service() {
                 val chunkId = sessionStateManager.saveChunk(file.absolutePath)
                 val sessionId = sessionStateManager.currentSessionId
                 if (chunkId > 0L && sessionId > 0L) {
-                    appEventLogger.log(LogCategory.RECORDING, "Chunk finalized (id=$chunkId)")
+                    // am4-1 (FR7): file size in KB alongside the chunk id, so the Logs screen
+                    // shows whether a chunk came out unusually small/large without needing
+                    // manual instrumentation. Interpolated straight into the free-text `message`
+                    // (per this story's boundary) — LogEvent/formatLine/LogFileReader stay untouched.
+                    // Guards file.exists() first (mirrors SupabaseUploadWorker.doWork's own check
+                    // before touching a chunk file): a concurrently-deleted/moved file must log a
+                    // value clearly distinguishable from a real small chunk (-1), never a plain 0
+                    // that would masquerade as "just a small file" (code review, am4-1, patch 4).
+                    val sizeKb = if (file.exists()) computeChunkSizeKb(file.length()) else -1L
+                    appEventLogger.log(LogCategory.RECORDING, "Chunk finalized (id=$chunkId, sizeKb=$sizeKb)")
                     // Each enqueue is isolated: a failure enqueuing one worker (e.g. WorkManager
                     // internals throwing) must never prevent the other from running — they are
                     // independent upload pipelines (Whisper vs Supabase) for the same chunk.
