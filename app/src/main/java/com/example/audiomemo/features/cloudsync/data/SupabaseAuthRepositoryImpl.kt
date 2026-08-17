@@ -33,6 +33,16 @@ class SupabaseAuthRepositoryImpl @Inject constructor(
         Result.failure(e)
     }
 
+    // am-hotfix (supabase session init) code review, patch 5: this maps `sessionStatus`
+    // reactively without awaiting initialization first, so on a cold start the emitted `Flow` can
+    // transiently show `false` ("not signed in") for a moment while gotrue-kt is still loading the
+    // persisted session from disk (SessionStatus.LoadingFromStorage), before naturally settling to
+    // the correct value once that load resolves. Unlike SupabaseUploadWorker's bug, this is
+    // harmless and self-correcting — a reactive Flow collector (CloudSyncSettingsViewModel's
+    // `isAuthenticated`, today) just sees a brief transient, not a permanent stuck state, so no
+    // functional fix is needed here. If a future caller ever adds a one-shot (non-Flow) auth check
+    // instead of observing this Flow, follow the SupabaseUploadWorker.doWork() pattern
+    // (`awaitInitialization()` before reading state) rather than assuming this self-heals.
     override fun currentSessionFlow(): Flow<Boolean> =
         supabaseClient.auth.sessionStatus.map { status -> status is SessionStatus.Authenticated }
 }

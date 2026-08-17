@@ -16,6 +16,7 @@ import dagger.hilt.components.SingletonComponent
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.gotrue.auth
 import java.io.File
+import kotlinx.coroutines.withTimeoutOrNull
 
 @EntryPoint
 @InstallIn(SingletonComponent::class)
@@ -45,6 +46,19 @@ class SupabaseUploadWorker(
         const val KEY_SESSION_ID = "session_id"
         const val WORK_NAME_PREFIX = "supabase_upload_"
         private const val TAG = "SupabaseUploadWorker"
+
+        /**
+         * Budget for the `awaitInitialization()` call in [doWork] below (am-hotfix code review,
+         * patch 2). The
+         * underlying session load goes through `DataStoreSessionManager.loadSession()` (disk
+         * I/O) — if that ever hangs (file lock contention, etc.), this worker would otherwise
+         * suspend indefinitely and hold the WorkManager execution slot. Mirrors
+         * `BootCompletedReceiver.PREFERENCE_READ_TIMEOUT_MS`, the established idiom in this
+         * codebase for exactly this class of "bound a disk-I/O suspend call" risk. On timeout,
+         * [doWork] falls through to the existing `currentSessionOrNull() == null` check exactly
+         * as before this hotfix — same safe failure path, no new behavior on timeout.
+         */
+        private const val AUTH_INIT_TIMEOUT_MS = 5_000L
 
         /**
          * Deletes [file] after the Supabase upload was confirmed `DONE` (FR7/am1-3). Pure,
@@ -163,6 +177,22 @@ class SupabaseUploadWorker(
         // next time that specific chunk's finish event fires again, which it won't) — out of
         // scope here per the am1-3 story; see PRD FR2 (login persists) for why this is expected
         // to be rare in practice once login succeeds once.
+        // am-hotfix (supabase session init): gotrue-kt loads the persisted session from disk
+        // ASYNCHRONOUSLY on SupabaseClient creation; currentSessionOrNull() is a synchronous read
+        // of whatever is already in memory and never waits for that load. This worker is
+        // frequently the first thing to touch Auth after a process restart (always-on, no UI) —
+        // without this await, a chunk can catch the session mid-SessionStatus.LoadingFromStorage
+        // and get stuck PENDING forever ("not signed in"), even though a valid session is already
+        // on disk. awaitInitialization() resolves to `sessionStatus.first { it !is
+        // SessionStatus.LoadingFromStorage }` and never throws (NetworkError/NotAuthenticated both
+        // resolve normally), so no try/catch is needed here. This is the decisive fix — the
+        // warmup in AudioMemoApplication.onCreate() is only an optimization that makes this a
+        // no-op in the common case. Bounded by AUTH_INIT_TIMEOUT_MS (code review, patch 2): on the
+        // rare chance the underlying disk read hangs, this falls through to the exact same
+        // currentSessionOrNull() == null path as before this hotfix, instead of suspending forever
+        // and holding the WorkManager execution slot.
+        withTimeoutOrNull(AUTH_INIT_TIMEOUT_MS) { supabaseClient.auth.awaitInitialization() }
+
         if (supabaseClient.auth.currentSessionOrNull() == null) {
             appEventLogger.log(LogCategory.UPLOAD, "Supabase upload skipped: not signed in (chunk=$chunkId)")
             return Result.failure()

@@ -112,6 +112,14 @@ Multiple interruptions can overlap (e.g., a phone call arrives while audio focus
   older restriction from Android 12's background-foreground-service-start limitation — the one the
   receiver's own `IllegalStateException`/`SecurityException` handling guards against once it *is*
   running.)
+- **Supabase session is restored from disk asynchronously.** `gotrue-kt` loads the persisted
+  session (access/refresh token) into memory in the background when `SupabaseClient` is created —
+  it does not finish before the constructor returns. `Auth.currentSessionOrNull()` is a
+  *synchronous* read of whatever is already in memory, so calling it immediately after a fresh
+  process start (before that background load finishes) can incorrectly read "not signed in" even
+  though a valid session is sitting on disk. Any code that checks auth state right after process
+  start — background workers included — must call the SDK's `Auth.awaitInitialization()` first
+  and only then read the session. See `SupabaseUploadWorker.doWork()` for the reference fix.
 
 ## Architecture Highlights
 

@@ -18,6 +18,18 @@ import java.io.File
  * actual decision — what to delete, what status to persist, what `Result` to return — is
  * testable from plain-JVM `src/test`; `doWork()` itself is a thin executor of that decision
  * (am1-3 code review finding: previously this was only "verified by reading the code").
+ *
+ * **Same constraint applies to the am-hotfix (supabase session init) fix**: `doWork()` now calls
+ * `supabaseClient.auth.awaitInitialization()` immediately before the existing
+ * `currentSessionOrNull() == null` check. Both are real calls against `gotrue-kt`'s `Auth`
+ * (`awaitInitialization()` suspends on `sessionStatus`, `currentSessionOrNull()` reads in-memory
+ * state) — there is no pure decision to extract here the way [decideUploadOutcome] extracts
+ * "what to do once the upload result is known": the fix *is* the ordering of these two real SDK
+ * calls at the `doWork()` call site, which needs a live (or Robolectric-simulated)
+ * `SupabaseClient`/`Context` to exercise, and this project has no such infra (see above). Verified
+ * instead by direct code reading of `doWork()` (the `awaitInitialization()` call sits directly
+ * above the `currentSessionOrNull()` check) plus the manual on-device repro described in this
+ * story's Verification section.
  */
 class SupabaseUploadWorkerTest : StringSpec({
 
