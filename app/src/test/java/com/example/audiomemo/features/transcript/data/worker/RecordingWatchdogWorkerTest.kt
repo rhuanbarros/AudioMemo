@@ -84,4 +84,21 @@ class RecordingWatchdogWorkerTest : StringSpec({
 
         check(!restart) { "exactly at the threshold is not yet stale (strictly greater-than check)" }
     }
+
+    "needsRestart is true when the clock went backward (device reboot resets elapsedRealtime)" {
+        // now < lastHeartbeatAt only happens when the monotonic clock itself was reset (reboot)
+        // while a persisted (and therefore pre-reboot) heartbeat value survived in DataStore.
+        val lastHeartbeatAt = 500_000L
+        val now = 10_000L
+
+        val restart = RecordingWatchdogWorker.needsRestart(
+            recordingShouldBeActive = true,
+            lastHeartbeatAt = lastHeartbeatAt,
+            now = now
+        )
+
+        check(restart) {
+            "a clock that went backward must never mask a genuinely dead service as fresh"
+        }
+    }
 })

@@ -91,13 +91,20 @@ class RecordingWatchdogWorker(
          * the same monotonic clock ([SystemClock.elapsedRealtime], never wall-clock time — see
          * [doWork] and [AppPreferencesRepository.recordHeartbeat]) so this comparison is immune
          * to wall-clock jumps (NTP sync, manual time change, DST).
+         *
+         * **Reboot guard (am3-5 code review, twin fix):** [SystemClock.elapsedRealtime] resets to
+         * ~0 on device reboot, but [lastHeartbeatAt] is persisted (survives reboot) — if the
+         * process was killed around/by a reboot, `now - lastHeartbeatAt` goes negative and would
+         * never read as stale, silently masking a genuinely dead service. `now < lastHeartbeatAt`
+         * (clock went backward) is therefore also treated as stale.
          */
         internal fun needsRestart(
             recordingShouldBeActive: Boolean,
             lastHeartbeatAt: Long,
             now: Long
         ): Boolean =
-            recordingShouldBeActive && (now - lastHeartbeatAt) > HEARTBEAT_STALE_THRESHOLD_MS
+            recordingShouldBeActive &&
+                ((now - lastHeartbeatAt) > HEARTBEAT_STALE_THRESHOLD_MS || now < lastHeartbeatAt)
 
         /**
          * Schedules the periodic watchdog, idempotently — safe to call on every app process

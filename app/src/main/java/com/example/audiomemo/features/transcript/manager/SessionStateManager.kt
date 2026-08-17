@@ -49,16 +49,47 @@ class SessionStateManager(
         if (currentSessionId > 0) sessionDao.updateState(currentSessionId, SessionState.STOPPED)
     }
 
-    suspend fun saveChunk(filePath: String): Long = withContext(Dispatchers.IO) {
+    /**
+     * Creates the chunk's Room row in [ChunkStatus.RECORDING], right when recording of a new
+     * chunk begins (am3-5) — before this, a chunk killed mid-recording left no trace in Room at
+     * all until [saveChunk] ran, so the corrupted `.m4a` was untraceable. [saveChunk] later
+     * UPDATEs this same row (matched by [filePath], stable across a chunk's lifetime) instead of
+     * inserting a second row.
+     */
+    suspend fun markChunkStarted(filePath: String): Long = withContext(Dispatchers.IO) {
         if (currentSessionId > 0) {
             chunkDao.insert(
                 ChunkEntity(
                     sessionId = currentSessionId,
                     chunkIndex = chunkIndex++,
                     filePath = filePath,
-                    status = ChunkStatus.PENDING
+                    status = ChunkStatus.RECORDING
                 )
             )
+        } else -1L
+    }
+
+    suspend fun saveChunk(filePath: String): Long = withContext(Dispatchers.IO) {
+        if (currentSessionId > 0) {
+            val existing = chunkDao.getChunkByFilePathAndSession(filePath, currentSessionId)
+            if (existing != null) {
+                // Normal path (am3-5): update the RECORDING row markChunkStarted already created
+                // for this exact filePath instead of inserting a second row for the same chunk.
+                chunkDao.update(existing.copy(status = ChunkStatus.PENDING))
+                existing.id
+            } else {
+                // Defensive fallback, should not happen in the normal flow (markChunkStarted is
+                // always called before a chunk starts recording) — insert rather than silently
+                // losing the chunk, matching pre-am3-5 behavior for this edge case.
+                chunkDao.insert(
+                    ChunkEntity(
+                        sessionId = currentSessionId,
+                        chunkIndex = chunkIndex++,
+                        filePath = filePath,
+                        status = ChunkStatus.PENDING
+                    )
+                )
+            }
         } else -1L
     }
 }

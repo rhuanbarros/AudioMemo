@@ -50,6 +50,13 @@ class AudioRecorderManager(private val context: Context) {
     /** Called whenever a chunk is completed (rotation or pause/stop). */
     var onChunkCompleted: ((File) -> Unit)? = null
 
+    /**
+     * Called right before the underlying `MediaRecorder.start()` for a new chunk (am3-5) — lets
+     * the caller record a "recording started" trace (a Room row in `RECORDING`) before any audio
+     * is actually captured, so a chunk killed mid-recording is never entirely untraceable.
+     */
+    var onChunkStarted: ((filePath: String) -> Unit)? = null
+
     /** Called when storage drops below the minimum threshold during recording. */
     var onStorageLow: (() -> Unit)? = null
 
@@ -134,7 +141,8 @@ class AudioRecorderManager(private val context: Context) {
         finaliseCurrentChunk(label = "chunk")
 
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        currentOutputFile = File(context.filesDir, "audio_chunk_$timestamp.m4a")
+        val outputFile = File(context.filesDir, "audio_chunk_$timestamp.m4a")
+        currentOutputFile = outputFile
 
         mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
@@ -145,7 +153,7 @@ class AudioRecorderManager(private val context: Context) {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            setOutputFile(currentOutputFile?.absolutePath)
+            setOutputFile(outputFile.absolutePath)
             setOnErrorListener { _, _, _ ->
                 Log.e("AudioRecorderManager", "MediaRecorder hardware error — stopping recording")
                 cancelMonitoringJobs()
@@ -153,6 +161,10 @@ class AudioRecorderManager(private val context: Context) {
             }
             try {
                 prepare()
+                // am3-5: fire before start() so the caller can create the chunk's Room row
+                // (RECORDING) before any audio is actually captured — closes the race where a
+                // kill mid-chunk left no trace of the chunk anywhere in Room.
+                onChunkStarted?.invoke(outputFile.absolutePath)
                 start()
             } catch (e: Exception) {
                 e.printStackTrace()

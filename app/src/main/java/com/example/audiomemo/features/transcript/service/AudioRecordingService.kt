@@ -179,6 +179,22 @@ class AudioRecordingService : Service() {
                 }
             }
         }
+        recorder.onChunkStarted = { filePath ->
+            // am3-5: this must complete before AudioRecorderManager's start() call (invoked
+            // immediately after this callback returns — see startNewChunk) actually captures any
+            // audio, otherwise the race this story exists to close (a chunk recording with no
+            // Room row at all, producing an untraceable corrupted .m4a on a kill) stays open.
+            // Blocking mirrors the same correctness-over-async tradeoff already established for
+            // setRecordingShouldBeActive below (am3-2 code review, CRITICAL finding).
+            val chunkId = runBlocking { sessionStateManager.markChunkStarted(filePath) }
+            if (chunkId <= 0L) {
+                // (code review, am3-5, patch 6): mirrors the explicit invalid-id logging already
+                // done around onChunkCompleted below — shouldn't happen (markChunkStarted only
+                // returns <= 0L with no active session), but silently discarding it here would
+                // hide exactly the "no active session" edge case a reviewer would want visible.
+                Log.w(TAG, "markChunkStarted returned invalid id=$chunkId for $filePath (no active session?)")
+            }
+        }
         recorder.onStorageLow = { handleLowStorage() }
         recorder.onHardwareError = { handleHardwareError() }
 
@@ -237,11 +253,18 @@ class AudioRecordingService : Service() {
             NotificationHelper.buildForegroundNotification(this, stopPendingIntent())
         )
 
-        serviceScope.launch {
-            val sessionId = sessionStateManager.startSession()
-            _currentSessionId.value = sessionId
-            enqueueFinalizationWorker(sessionId)
-        }
+        // am3-5: must complete — and currentSessionId must be set — before recorder.startRecording()
+        // runs below. onChunkStarted fires synchronously inside startRecording() (for the
+        // session's very first chunk) and needs a valid currentSessionId to create that chunk's
+        // RECORDING row. The previous fire-and-forget serviceScope.launch here raced against that
+        // first callback and would very likely lose it (a Dispatchers.IO thread-hop vs. an
+        // immediate same-thread call a few lines below), silently skipping the Room row for
+        // exactly the chunk this story cares about most. Blocking mirrors the same
+        // correctness-over-async tradeoff already established for setRecordingShouldBeActive
+        // just below (am3-2 code review, CRITICAL finding).
+        val sessionId = runBlocking { sessionStateManager.startSession() }
+        _currentSessionId.value = sessionId
+        enqueueFinalizationWorker(sessionId)
 
         // am3-2 (FR2): record the owner's intent so RecordingWatchdogWorker (and, post-reboot,
         // the am3-3 boot receiver) know recording should be running. Only ever flipped back to
@@ -503,6 +526,21 @@ class AudioRecordingService : Service() {
         val savedChunkJob = lastChunkSaveJob
         serviceScope.launch {
             savedChunkJob?.join()
+            // (code review, am3-5, patch 1 — CRITICAL): this path deliberately never calls
+            // recorder.stopRecording() (the recorder may already be broken) — it never routes
+            // through AudioRecorderManager.finaliseCurrentChunk(), unlike every other stop
+            // handler in this class. If onChunkStarted already created a RECORDING row for the
+            // in-flight chunk right before MediaRecorder.start() failed, that row must be
+            // resolved to FAILED HERE, before the session below is marked STOPPED and its
+            // finalization worker cancelled — after that, no sweep could ever reach it again:
+            // ChunkFinalizationWorker.doWork() early-returns once session.state == STOPPED, the
+            // worker itself is about to be cancelled, and the heartbeat would likely still read
+            // fresh at this exact moment anyway (the service was alive and ticking right up
+            // until the error). Reuses the exact same resolution logic the worker's own sweep
+            // uses (see ChunkFinalizationWorker.resolveLostChunks's KDoc), not a duplicate copy.
+            if (sessionId > 0L) {
+                ChunkFinalizationWorker.resolveLostChunks(chunkDao, appEventLogger, sessionId)
+            }
             sessionStateManager.stopSession()
             cancelFinalizationWorker(sessionId)
             enqueueTranscriptionChain(sessionId)
