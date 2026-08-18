@@ -5,29 +5,42 @@
     <!-- Accessibility / content descriptions -->
     <string name="cd_back">Back</string>
     <string name="cd_settings">Settings</string>
-    <string name="cd_record">Record</string>
     <string name="cd_share">Share</string>
 
-    <!-- Navigation tabs -->
-    <string name="nav_tab_home">Home</string>
-    <string name="nav_tab_meetings">Meetings</string>
-    <string name="nav_tab_settings">Settings</string>
-
-    <!-- Home -->
-    <string name="home_welcome">Welcome to AudioMemo</string>
-    <string name="home_capture_notes">Capture Notes</string>
-    <string name="home_mic_permission_denied">Microphone permission is required to record audio.</string>
-    <string name="home_tap_to_record">Tap to Record</string>
+    <!-- Home: status/health panel (am-hotfix-home-status-redesign) -->
     <string name="home_recent">Recent</string>
-    <string name="home_view_all">View all</string>
     <string name="home_no_recordings_title">No recordings yet</string>
-    <string name="home_no_recordings_body">Tap the button above to start your first recording</string>
+    <string name="home_no_recordings_body">Recordings will show up here automatically</string>
     <string name="home_status_summarized">Summarized</string>
     <string name="home_status_processing">Processing</string>
     <string name="home_status_failed">Failed</string>
+    <string name="home_status_recording">RECORDING</string>
+    <string name="home_status_paused">PAUSED</string>
+    <string name="home_status_unknown">Checking status…</string>
+    <string name="home_health_strip_title">Last 24 hours</string>
+    <string name="home_sync_title">Cloud sync</string>
+    <string name="home_sync_up_to_date">All caught up — everything is synced</string>
+    <string name="home_sync_pending">%1$d file(s) waiting to upload (%2$s)</string>
+    <string name="home_sync_offline_hint">No internet — recording normally, will sync once you\'re back online</string>
+    <string name="home_storage_title">Local storage</string>
+    <string name="home_storage_empty">No leftover files</string>
+    <string name="home_storage_count">%1$d already-uploaded file(s) still on device (%2$s)</string>
+    <string name="home_storage_clear_button">Clear uploaded files</string>
+    <string name="home_storage_clear_confirm_title">Clear uploaded files?</string>
+    <string name="home_storage_clear_confirm_body">This deletes %1$d file(s) (%2$s) already confirmed uploaded to the cloud. Files still waiting to upload are never touched.</string>
+    <string name="home_storage_clear_confirm_action">Clear</string>
+    <string name="home_banner_normal">✅ Everything is working normally</string>
+    <string name="home_banner_no_data">ℹ️ No recording history yet</string>
+    <string name="home_banner_error">⚠️ %1$s — View logs →</string>
+    <string name="home_health_segment_cd">%1$s: %2$s</string>
+    <string name="home_health_state_recording">Recording</string>
+    <string name="home_health_state_paused">Paused</string>
+    <string name="home_health_state_error">Error</string>
+    <string name="home_health_state_no_data">No data</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
+    <string name="settings_cancel">Cancel</string>
     <string name="settings_section_appearance">Appearance</string>
     <string name="settings_section_general">General</string>
     <string name="settings_appearance">Appearance</string>
@@ -60,13 +73,6 @@
     <string name="cloudsync_error_invalid_credentials">Incorrect email or password.</string>
     <string name="cloudsync_error_network">No internet connection. Check your network and try again.</string>
     <string name="cloudsync_error_unknown">Something went wrong. Please try again.</string>
-
-    <!-- Meetings Dashboard -->
-    <string name="meetings_title">Meetings</string>
-    <string name="meetings_empty_title">No meetings yet</string>
-    <string name="meetings_empty_body">Capture your first note to get started</string>
-    <string name="meetings_cd_summary_ready">Summary ready</string>
-    <string name="meetings_cd_generating">Generating</string>
 
     <!-- Meeting Details -->
     <string name="meeting_details_tab_transcript">Transcript</string>

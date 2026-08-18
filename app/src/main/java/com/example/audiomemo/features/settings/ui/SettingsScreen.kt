@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.CloudSync
@@ -32,6 +33,7 @@ import android.content.res.Configuration
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -57,15 +59,19 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.audiomemo.BuildConfig
 import com.example.audiomemo.R
-import com.example.audiomemo.features.home.ui.HomeBottomNavBar
-import com.example.audiomemo.features.home.ui.HomeTab
 import com.example.audiomemo.ui.theme.AudioMemoTheme
 
+/**
+ * Reached only from Home's top-bar gear icon since am-hotfix-home-status-redesign (Settings left
+ * the bottom nav — the bottom nav itself is gone, along with the Meetings tab it used to share
+ * with Home). [onNavigateBack] mirrors the same back-arrow pattern already used by
+ * [com.example.audiomemo.features.logs.ui.LogsScreen] / `CloudSyncSettingsScreen` for every other
+ * non-tab screen in the app.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    onNavigateToHome: () -> Unit = {},
-    onNavigateToMeetings: () -> Unit = {},
+    onNavigateBack: () -> Unit = {},
     onNavigateToAppearances: () -> Unit = {},
     onNavigateToCloudSync: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {}
@@ -116,16 +122,18 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onBackground
                     )
                 },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.cd_back),
+                            tint = MaterialTheme.colorScheme.onBackground
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background
                 )
-            )
-        },
-        bottomBar = {
-            HomeBottomNavBar(
-                selectedTab = HomeTab.Settings,
-                onHomeClick = onNavigateToHome,
-                onMeetingsClick = onNavigateToMeetings
             )
         }
     ) { paddingValues ->

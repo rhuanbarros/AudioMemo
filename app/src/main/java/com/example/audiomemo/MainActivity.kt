@@ -23,7 +23,6 @@ import com.example.audiomemo.features.cloudsync.ui.CloudSyncSettingsScreen
 import com.example.audiomemo.features.home.ui.HomeScreen
 import com.example.audiomemo.features.logs.ui.LogsScreen
 import com.example.audiomemo.features.meetings.ui.MeetingDetailsScreen
-import com.example.audiomemo.features.meetings.ui.MeetingsDashboardScreen
 import com.example.audiomemo.features.settings.ui.AppearanceScreen
 import com.example.audiomemo.features.settings.ui.AppearanceViewModel
 import com.example.audiomemo.features.settings.ui.SettingsScreen
@@ -70,14 +69,6 @@ private fun AudioMemoApp(
             ) {
                 composable("home") {
                     HomeScreen(
-                        onNavigateToTranscript = {
-                            navController.navigate("transcript")
-                        },
-                        onNavigateToMeetings = {
-                            navController.navigate("meetings") {
-                                launchSingleTop = true
-                            }
-                        },
                         onNavigateToMeetingDetails = { sessionId ->
                             navController.navigate("meeting-details/$sessionId")
                         },
@@ -85,22 +76,15 @@ private fun AudioMemoApp(
                             navController.navigate("settings") {
                                 launchSingleTop = true
                             }
+                        },
+                        onNavigateToLogs = {
+                            navController.navigate("logs")
                         }
                     )
                 }
                 composable("settings") {
                     SettingsScreen(
-                        onNavigateToHome = {
-                            navController.navigate("home") {
-                                popUpTo("home") { inclusive = false }
-                                launchSingleTop = true
-                            }
-                        },
-                        onNavigateToMeetings = {
-                            navController.navigate("meetings") {
-                                launchSingleTop = true
-                            }
-                        },
+                        onNavigateBack = { navController.popBackStack() },
                         onNavigateToAppearances = {
                             navController.navigate("appearances")
                         },
@@ -120,24 +104,6 @@ private fun AudioMemoApp(
                 composable("logs") {
                     LogsScreen(
                         onNavigateBack = { navController.popBackStack() }
-                    )
-                }
-                composable("meetings") {
-                    MeetingsDashboardScreen(
-                        onNavigateToHome = {
-                            navController.navigate("home") {
-                                popUpTo("home") { inclusive = false }
-                                launchSingleTop = true
-                            }
-                        },
-                        onNavigateToSettings = {
-                            navController.navigate("settings") {
-                                launchSingleTop = true
-                            }
-                        },
-                        onMeetingClick = { sessionId ->
-                            navController.navigate("meeting-details/$sessionId")
-                        }
                     )
                 }
                 composable("appearances") {
