@@ -8,7 +8,6 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -28,16 +27,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
@@ -50,12 +45,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,7 +64,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -84,8 +75,6 @@ import com.example.audiomemo.features.home.domain.model.HealthState
 import com.example.audiomemo.features.home.ui.state.HealthBanner
 import com.example.audiomemo.features.home.ui.state.HomeUiState
 import com.example.audiomemo.features.home.ui.state.LiveRecordingStatus
-import com.example.audiomemo.features.summary.domain.model.SummaryStatus
-import com.example.audiomemo.features.transcript.domain.model.SessionState
 import com.example.audiomemo.features.transcript.service.AudioRecordingService
 import com.example.audiomemo.ui.theme.AudioMemoTheme
 import com.example.audiomemo.ui.theme.RecordingRed
@@ -100,8 +89,9 @@ private const val TAG = "HomeScreen"
 /**
  * Home as a pure status/health panel (am-hotfix-home-status-redesign) — no manual recording
  * control anywhere on this screen (no start/pause/stop). Five blocks, top to bottom: live status,
- * 24h health strip, cloud sync, local storage, health banner — followed by the unchanged "Recent"
- * sessions list.
+ * 24h health strip, cloud sync, local storage, health banner. The "Recent" individual-sessions
+ * list and its detail screen were removed (am-hotfix-rename-and-declutter-home) — the owner
+ * inspects individual recordings directly via Supabase, not through the app.
  *
  * **`RECORD_AUDIO` (+ `POST_NOTIFICATIONS` on API 33+) permission request** (code review, patch
  * 0 — CRITICAL): this is the app's only remaining entry point for it. The pre-redesign Home had a
@@ -117,13 +107,11 @@ private const val TAG = "HomeScreen"
  */
 @Composable
 fun HomeScreen(
-    onNavigateToMeetingDetails: (Long) -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
-    val recentMeetings by viewModel.recentMeetings.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -153,11 +141,8 @@ fun HomeScreen(
 
     HomeContent(
         uiState = uiState,
-        recentMeetings = recentMeetings,
         onNavigateToSettings = onNavigateToSettings,
         onNavigateToLogs = onNavigateToLogs,
-        onMeetingClick = onNavigateToMeetingDetails,
-        onDeleteMeeting = { viewModel.deleteSession(it) },
         onClearUploadedLocalFiles = { viewModel.clearUploadedLocalFiles() }
     )
 }
@@ -190,11 +175,8 @@ private fun startRecordingServiceAfterPermissionGranted(context: android.content
 @Composable
 fun HomeContent(
     uiState: HomeUiState,
-    recentMeetings: List<MeetingListItem>,
     onNavigateToSettings: () -> Unit = {},
     onNavigateToLogs: () -> Unit = {},
-    onMeetingClick: (Long) -> Unit,
-    onDeleteMeeting: (Long) -> Unit = {},
     onClearUploadedLocalFiles: () -> Unit = {}
 ) {
     Scaffold(
@@ -249,40 +231,6 @@ fun HomeContent(
                     banner = uiState.healthBanner,
                     onClick = onNavigateToLogs
                 )
-            }
-
-            // Recent recordings header
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = stringResource(R.string.home_recent),
-                        style = MaterialTheme.typography.displayLarge,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                }
-            }
-
-            // Recording cards or empty state
-            if (recentMeetings.isEmpty()) {
-                item { EmptyRecordingsState() }
-            } else {
-                items(recentMeetings, key = { it.sessionId }) { meeting ->
-                    SwipeToDeleteWrapper(
-                        onDelete = { onDeleteMeeting(meeting.sessionId) },
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        RecordingCard(
-                            meeting = meeting,
-                            onClick = { onMeetingClick(meeting.sessionId) }
-                        )
-                    }
-                }
             }
         }
     }
@@ -605,215 +553,11 @@ private fun HealthBannerCard(banner: HealthBanner, onClick: () -> Unit) {
     }
 }
 
-// ── Recording card (unchanged from the pre-redesign Home) ──────────────────
-
-@Composable
-private fun RecordingCard(
-    meeting: MeetingListItem,
-    onClick: () -> Unit
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 5.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            // Mic icon badge
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                modifier = Modifier.size(42.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.GraphicEq,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-            }
-
-            // Title + meta
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = meeting.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = formatDate(meeting.startTime),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                    Text(
-                        text = "•",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                    Text(
-                        text = formatDuration(meeting.durationMs),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                }
-            }
-
-            // Status badge + chevron
-            Column(horizontalAlignment = Alignment.End) {
-                SummaryStatusBadge(status = meeting.summaryStatus)
-                Spacer(modifier = Modifier.height(4.dp))
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SummaryStatusBadge(status: SummaryStatus?) {
-    val (labelRes, color) = when (status) {
-        SummaryStatus.DONE -> R.string.home_status_summarized to MaterialTheme.colorScheme.primary
-        SummaryStatus.GENERATING -> R.string.home_status_processing to MaterialTheme.colorScheme.tertiary
-        SummaryStatus.FAILED -> R.string.home_status_failed to MaterialTheme.colorScheme.error
-        else -> return
-    }
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = color.copy(alpha = 0.15f)
-    ) {
-        Text(
-            text = stringResource(labelRes),
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-        )
-    }
-}
-
-// ── Empty state ───────────────────────────────────────────────────────────────
-
-@Composable
-private fun EmptyRecordingsState() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.size(64.dp)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Default.Mic,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.size(30.dp)
-                )
-            }
-        }
-        Text(
-            text = stringResource(R.string.home_no_recordings_title),
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = stringResource(R.string.home_no_recordings_body),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline
-        )
-    }
-}
-
-// ── Swipe-to-delete wrapper ───────────────────────────────────────────────────
-// private (code review, patch H): its only external consumer, MeetingsDashboardScreen, was
-// deleted in this same story — this is now used exclusively from within this file.
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SwipeToDeleteWrapper(
-    onDelete: () -> Unit,
-    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(14.dp),
-    content: @Composable () -> Unit
-) {
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart) { onDelete(); true } else false
-        }
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            val bgColor by animateColorAsState(
-                targetValue = if (dismissState.targetValue == SwipeToDismissBoxValue.EndToStart)
-                    MaterialTheme.colorScheme.errorContainer
-                else
-                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0f),
-                label = "swipeDeleteBg"
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(shape)
-                    .background(bgColor)
-                    .padding(end = 20.dp),
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete recording",
-                    tint = MaterialTheme.colorScheme.onErrorContainer
-                )
-            }
-        }
-    ) {
-        content()
-    }
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-private fun formatDate(millis: Long): String =
-    SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(Date(millis))
 
 /** Hour-of-day label for a health-strip segment's accessibility description (patch F) — e.g. "14:00". */
 private fun formatHour(millis: Long): String =
     SimpleDateFormat("HH:00", Locale.getDefault()).format(Date(millis))
-
-private fun formatDuration(ms: Long): String {
-    val totalSeconds = ms / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return "%d:%02d".format(minutes, seconds)
-}
 
 /** Ticking elapsed-time display for the live status card — "H:MM:SS" once past an hour (an
  *  always-on session routinely runs for many hours), "M:SS" before that. Negative input (a clock
@@ -859,26 +603,7 @@ fun HomeScreenPreview() {
                 uploadedLocalCount = 0,
                 uploadedLocalBytes = 0L,
                 healthBanner = HealthBanner.Normal
-            ),
-            recentMeetings = listOf(
-                MeetingListItem(
-                    sessionId = 1L,
-                    title = "Team Standup – Sprint Review",
-                    startTime = System.currentTimeMillis() - 3_600_000,
-                    durationMs = 15 * 60 * 1000L,
-                    sessionState = SessionState.STOPPED,
-                    summaryStatus = SummaryStatus.DONE
-                ),
-                MeetingListItem(
-                    sessionId = 2L,
-                    title = "Product Roadmap Discussion",
-                    startTime = System.currentTimeMillis() - 86_400_000,
-                    durationMs = 45 * 60 * 1000L,
-                    sessionState = SessionState.STOPPED,
-                    summaryStatus = SummaryStatus.GENERATING
-                )
-            ),
-            onMeetingClick = {}
+            )
         )
     }
 }
@@ -897,9 +622,7 @@ fun HomeScreenErrorPreview() {
                 uploadedLocalCount = 1,
                 uploadedLocalBytes = 128_000L,
                 healthBanner = HealthBanner.Error("Hardware error — recording stopped")
-            ),
-            recentMeetings = emptyList(),
-            onMeetingClick = {}
+            )
         )
     }
 }

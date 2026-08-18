@@ -22,7 +22,6 @@ import com.example.audiomemo.core.preferences.ThemeMode
 import com.example.audiomemo.features.cloudsync.ui.CloudSyncSettingsScreen
 import com.example.audiomemo.features.home.ui.HomeScreen
 import com.example.audiomemo.features.logs.ui.LogsScreen
-import com.example.audiomemo.features.meetings.ui.MeetingDetailsScreen
 import com.example.audiomemo.features.settings.ui.AppearanceScreen
 import com.example.audiomemo.features.settings.ui.AppearanceViewModel
 import com.example.audiomemo.features.settings.ui.SettingsScreen
@@ -69,9 +68,6 @@ private fun AudioMemoApp(
             ) {
                 composable("home") {
                     HomeScreen(
-                        onNavigateToMeetingDetails = { sessionId ->
-                            navController.navigate("meeting-details/$sessionId")
-                        },
                         onNavigateToSettings = {
                             navController.navigate("settings") {
                                 launchSingleTop = true
@@ -134,21 +130,6 @@ private fun AudioMemoApp(
                             navController.popBackStack("home", inclusive = false)
                         },
                         onViewTranscript = {
-                            navController.popBackStack()
-                        }
-                    )
-                }
-
-                composable(
-                    route = "meeting-details/{sessionId}",
-                    arguments = listOf(
-                        navArgument("sessionId") { type = NavType.LongType }
-                    )
-                ) { backStackEntry ->
-                    val sessionId = backStackEntry.arguments?.getLong("sessionId") ?: -1L
-                    MeetingDetailsScreen(
-                        sessionId = sessionId,
-                        onNavigateBack = {
                             navController.popBackStack()
                         }
                     )

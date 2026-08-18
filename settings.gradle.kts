@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AudioMemo"
+rootProject.name = "LifeMemo"
 include(":app")

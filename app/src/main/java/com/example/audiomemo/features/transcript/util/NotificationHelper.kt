@@ -11,6 +11,7 @@ import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.example.audiomemo.MainActivity
+import com.example.audiomemo.R
 
 object NotificationHelper {
 
@@ -36,7 +37,7 @@ object NotificationHelper {
                 "Audio Recording",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Shown while AudioMemo is recording audio"
+                description = "Shown while ${context.getString(R.string.app_name)} is recording audio"
             }
             notificationManager(context).createNotificationChannel(recordingChannel)
 
@@ -113,7 +114,7 @@ object NotificationHelper {
         stopIntent: PendingIntent
     ): Notification {
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("AudioMemo")
+            .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(contentPendingIntent(context))
@@ -130,7 +131,7 @@ object NotificationHelper {
         stopIntent: PendingIntent
     ): Notification {
         return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("AudioMemo")
+            .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(contentPendingIntent(context))
@@ -151,7 +152,7 @@ object NotificationHelper {
     private fun buildAlert(context: Context, text: String): Notification {
         val contentIntent = contentPendingIntent(context)
         return NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
-            .setContentTitle("AudioMemo")
+            .setContentTitle(context.getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(contentIntent)

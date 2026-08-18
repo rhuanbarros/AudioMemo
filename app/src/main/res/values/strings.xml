@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AudioMemo</string>
+    <string name="app_name">LifeMemo</string>
 
     <!-- Accessibility / content descriptions -->
     <string name="cd_back">Back</string>
@@ -8,12 +8,6 @@
     <string name="cd_share">Share</string>
 
     <!-- Home: status/health panel (am-hotfix-home-status-redesign) -->
-    <string name="home_recent">Recent</string>
-    <string name="home_no_recordings_title">No recordings yet</string>
-    <string name="home_no_recordings_body">Recordings will show up here automatically</string>
-    <string name="home_status_summarized">Summarized</string>
-    <string name="home_status_processing">Processing</string>
-    <string name="home_status_failed">Failed</string>
     <string name="home_status_recording">RECORDING</string>
     <string name="home_status_paused">PAUSED</string>
     <string name="home_status_unknown">Checking status…</string>
@@ -50,8 +44,8 @@
     <string name="settings_version">Version</string>
     <string name="settings_logs">Logs</string>
     <string name="settings_battery_optimization">Battery Optimization</string>
-    <string name="settings_battery_optimization_explanation">Exempt AudioMemo from battery optimization so recording keeps running in the background without interruption.</string>
-    <string name="settings_battery_optimization_granted_body">AudioMemo is exempt from battery optimization.</string>
+    <string name="settings_battery_optimization_explanation">Exempt LifeMemo from battery optimization so recording keeps running in the background without interruption.</string>
+    <string name="settings_battery_optimization_granted_body">LifeMemo is exempt from battery optimization.</string>
     <string name="settings_battery_optimization_status_granted">Granted</string>
 
     <!-- Logs -->
@@ -73,13 +67,6 @@
     <string name="cloudsync_error_invalid_credentials">Incorrect email or password.</string>
     <string name="cloudsync_error_network">No internet connection. Check your network and try again.</string>
     <string name="cloudsync_error_unknown">Something went wrong. Please try again.</string>
-
-    <!-- Meeting Details -->
-    <string name="meeting_details_tab_transcript">Transcript</string>
-    <string name="meeting_details_tab_summary">Summary</string>
-    <string name="meeting_details_no_transcript">No transcript available yet</string>
-    <string name="meeting_details_generating_summary">Generating summary…</string>
-    <string name="meeting_details_chunk_label">Chunk %d</string>
 
     <!-- Appearance -->
     <string name="appearance_title">Appearance</string>

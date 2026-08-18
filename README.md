@@ -1,10 +1,10 @@
-# AudioMemo
+# LifeMemo
 
-AudioMemo is a native Android application that records audio, transcribes it using the OpenAI Whisper API, and provides AI-powered summaries. Built with modern Android development practices, it features a sleek intuitive UI and robust background processing capabilities.
+LifeMemo is a native Android application that records audio, transcribes it using the OpenAI Whisper API, and provides AI-powered summaries. Built with modern Android development practices, it features a sleek intuitive UI and robust background processing capabilities.
 
 ## Features
 
-- **Audio Recording:** High-quality voice recording with a real-time audio wavelength visualization UI.
+- **Audio Recording:** Always-on, high-quality voice recording that starts automatically and never stops for the app's own policy reasons — only for genuine Android restrictions (low storage, revoked permission).
 - **Smart Chunking:** Automatically splits long audio recordings into manageable 2-minute chunks and saves them to local storage.
 - **AI Transcription:** Integrates with OpenAI's `whisper-1` model to provide accurate transcriptions of recorded audio.
 - **Intelligent Summarization:** Uses OpenAI's `gpt-4o-mini` model to generate concise summaries from the transcriptions.
@@ -71,7 +71,7 @@ The app requires the following permissions to function correctly:
 
 ## Interruption Handling
 
-AudioMemo is built to survive all common audio interruptions during a recording session. The table below describes every scenario, where it is handled, and what happens.
+LifeMemo is built to survive all common audio interruptions during a recording session. The table below describes every scenario, where it is handled, and what happens.
 
 | Scenario | Status | Mechanism | Behaviour |
 |---|---|---|---|
