@@ -1,5 +1,6 @@
 package com.example.audiomemo.features.cloudsync.data.worker
 
+import com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker.Companion.SessionRecoveryOutcome
 import com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker.Companion.UploadWorkerResultKind
 import com.example.audiomemo.features.transcript.domain.model.ChunkStatus
 import io.kotest.core.spec.style.StringSpec
@@ -19,8 +20,8 @@ import java.io.File
  * testable from plain-JVM `src/test`; `doWork()` itself is a thin executor of that decision
  * (am1-3 code review finding: previously this was only "verified by reading the code").
  *
- * **Same constraint applies to the am-hotfix (supabase session init) fix**: `doWork()` now calls
- * `supabaseClient.auth.awaitInitialization()` immediately before the existing
+ * **Same constraint applies to the am-hotfix (supabase session init) fix, patch 1**: `doWork()`
+ * calls `supabaseClient.auth.awaitInitialization()` immediately before the existing
  * `currentSessionOrNull() == null` check. Both are real calls against `gotrue-kt`'s `Auth`
  * (`awaitInitialization()` suspends on `sessionStatus`, `currentSessionOrNull()` reads in-memory
  * state) — there is no pure decision to extract here the way [decideUploadOutcome] extracts
@@ -30,6 +31,16 @@ import java.io.File
  * instead by direct code reading of `doWork()` (the `awaitInitialization()` call sits directly
  * above the `currentSessionOrNull()` check) plus the manual on-device repro described in this
  * story's Verification section.
+ *
+ * **Patch 2 (mid-session recurrence) is different — its decision IS extracted and tested.**
+ * Unlike patch 1, the recovery attempt (`loadFromStorage()`) and re-check (`currentSessionOrNull()`)
+ * feed a genuinely pure decision — [SupabaseUploadWorker.decideSessionRecoveryOutcome] — covered
+ * below the same way [decideUploadOutcome] is. Only the two real SDK calls that *produce* its
+ * inputs remain unverifiable from plain-JVM `src/test` (same Context/Auth constraint as patch 1);
+ * `doWork()`'s wiring of those inputs into the decision function was verified by direct code
+ * reading, not a new test (code review finding — a prior version of this file's docstring claimed
+ * "no pure decision to extract" for patch 2 too, which was inaccurate given this exact extraction
+ * was possible and has now been done).
  */
 class SupabaseUploadWorkerTest : StringSpec({
 
@@ -114,6 +125,89 @@ class SupabaseUploadWorkerTest : StringSpec({
 
         check(latency == 0L) {
             "a clock adjustment between the two reads must never surface as a negative latency: got $latency"
+        }
+    }
+
+    // am-hotfix patch 2 (mid-session recurrence, code review round): decideSessionRecoveryOutcome
+    // is the single source of truth for what doWork() does after a currentSessionOrNull() == null
+    // + loadFromStorage() recovery attempt.
+
+    "decideSessionRecoveryOutcome: session restored (regardless of loadFromStorage's own result) proceeds" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = true,
+            loadFromStorageResult = false,
+            runAttemptCount = 0
+        )
+
+        check(outcome == SessionRecoveryOutcome.PROCEED) {
+            "sessionRestored=true must win regardless of loadFromStorageResult — covers the " +
+                "narrow race where a concurrent caller restored the session (code review finding)"
+        }
+    }
+
+    "decideSessionRecoveryOutcome: disk confirmed empty (loadFromStorage=false) fails fast, no retry" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = false,
+            loadFromStorageResult = false,
+            runAttemptCount = 0
+        )
+
+        check(outcome == SessionRecoveryOutcome.FAIL_FAST) {
+            "a confirmed disk-empty session (real sign-out) must never be retried — burns " +
+                "battery hitting the same wall every time (the exact concern the pre-existing " +
+                "comment in doWork() warns against)"
+        }
+    }
+
+    "decideSessionRecoveryOutcome: disk confirmed empty still fails fast even at a high attempt count" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = false,
+            loadFromStorageResult = false,
+            runAttemptCount = 5
+        )
+
+        check(outcome == SessionRecoveryOutcome.FAIL_FAST) {
+            "FAIL_FAST must not depend on runAttemptCount at all — it's never a retry candidate"
+        }
+    }
+
+    "decideSessionRecoveryOutcome: ambiguous outcome (loadFromStorage found a session but import didn't stick) retries below the ceiling" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = false,
+            loadFromStorageResult = true,
+            runAttemptCount = 0
+        )
+
+        check(outcome == SessionRecoveryOutcome.RETRY) {
+            "loadFromStorageResult=true only proves disk HAD a session, not that the in-memory " +
+                "restore succeeded (gotrue-kt AuthImpl decompilation, code review finding) — " +
+                "this is transient/ambiguous, worth a bounded retry"
+        }
+    }
+
+    "decideSessionRecoveryOutcome: recovery call itself timed out/threw (null) retries below the ceiling" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = false,
+            loadFromStorageResult = null,
+            runAttemptCount = 2
+        )
+
+        check(outcome == SessionRecoveryOutcome.RETRY) {
+            "a null result (timeout or caught exception) is ambiguous, not a confirmed " +
+                "disk-empty signal — must retry, not fail fast, mirroring runAttemptCount < 3"
+        }
+    }
+
+    "decideSessionRecoveryOutcome: ambiguous outcome at the retry ceiling (attempt 3) gives up terminally" {
+        val outcome = SupabaseUploadWorker.decideSessionRecoveryOutcome(
+            sessionRestored = false,
+            loadFromStorageResult = true,
+            runAttemptCount = 3
+        )
+
+        check(outcome == SessionRecoveryOutcome.FAIL_TERMINAL) {
+            "expected FAIL_TERMINAL once runAttemptCount reaches the ceiling, mirroring the " +
+                "identical runAttemptCount < 3 boundary already used by decideUploadOutcome"
         }
     }
 })

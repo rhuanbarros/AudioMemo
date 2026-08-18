@@ -61,6 +61,19 @@ class SupabaseUploadWorker(
         private const val AUTH_INIT_TIMEOUT_MS = 5_000L
 
         /**
+         * Budget for the recovery [io.github.jan.supabase.gotrue.Auth.loadFromStorage] call in
+         * [doWork] (am-hotfix patch 2, mid-session recurrence). Same disk-I/O-hang rationale as
+         * [AUTH_INIT_TIMEOUT_MS] — this is a second, independent disk read (not just the
+         * cold-start one), so it gets its own bounded timeout rather than reusing the first
+         * call's already-spent budget. Unlike `awaitInitialization()`, this call's default
+         * `autoRefresh` parameter can also trigger a network-bound token refresh internally (code
+         * review finding), so [doWork] wraps it in try/catch in addition to this timeout — a
+         * thrown exception is treated the same as a timeout (ambiguous outcome, not a confirmed
+         * disk-empty signal), never left to crash the worker.
+         */
+        private const val AUTH_RECOVERY_TIMEOUT_MS = 5_000L
+
+        /**
          * Deletes [file] after the Supabase upload was confirmed `DONE` (FR7/am1-3). Pure,
          * `Context`/`Log`-free `internal` function — the call site (only when [decideUploadOutcome]
          * says `shouldDeleteFile == true`, i.e. a confirmed success, never on failure/pending) is
@@ -136,6 +149,48 @@ class SupabaseUploadWorker(
                 }
             )
         }
+
+        /** Outcome of [decideSessionRecoveryOutcome] — what [doWork] must log/return when it hit
+         * `currentSessionOrNull() == null` even after `awaitInitialization()`. */
+        internal enum class SessionRecoveryOutcome { PROCEED, FAIL_FAST, RETRY, FAIL_TERMINAL }
+
+        /**
+         * Pure decision for what [doWork] does after a `loadFromStorage()` recovery attempt
+         * (am-hotfix patch 2, code review round). Extracted for the same reason as
+         * [decideUploadOutcome] — plain-JVM-testable from `src/test`, `Context`/`Log`-free.
+         *
+         * [sessionRestored] is the authoritative signal — `currentSessionOrNull() != null`,
+         * re-checked fresh *after* the recovery attempt, independent of [loadFromStorageResult].
+         * This intentionally does not gate success on [loadFromStorageResult] being `true`: in a
+         * narrow race, some other concurrent caller (another chunk's worker, the app's warmup
+         * coroutine) can restore the session at the same instant this call's own attempt
+         * timed out or reported no session, and the session is genuinely usable either way (code
+         * review finding — gating on `recovered && sessionRestored` would wrongly retry/fail in
+         * that race window).
+         *
+         * [loadFromStorageResult] is `true`/`false` from a completed `loadFromStorage()` call, or
+         * `null` if the call itself timed out or threw. Per gotrue-kt 2.2.3's `AuthImpl` (verified
+         * by decompilation, code review round): the boolean return only reflects whether a
+         * session existed **on disk** — it does NOT confirm the in-memory session was actually
+         * restored (e.g. an expired token can be found on disk, `false`... `true` even trigger an
+         * internal refresh that itself fails). So `loadFromStorageResult == false` is a strong,
+         * narrow signal — disk genuinely has no session (real sign-out / never logged in) — worth
+         * failing fast without retry, exactly matching the pre-existing rationale in [doWork]'s
+         * comment above this call site ("retrying would just burn battery hitting the same wall
+         * every time"). Any other non-restored case (`true` but still not restored, or the call
+         * itself failed/timed out) is treated as transient and gets the same bounded retry
+         * [decideUploadOutcome] already uses for actual upload failures.
+         */
+        internal fun decideSessionRecoveryOutcome(
+            sessionRestored: Boolean,
+            loadFromStorageResult: Boolean?,
+            runAttemptCount: Int
+        ): SessionRecoveryOutcome = when {
+            sessionRestored -> SessionRecoveryOutcome.PROCEED
+            loadFromStorageResult == false -> SessionRecoveryOutcome.FAIL_FAST
+            runAttemptCount < 3 -> SessionRecoveryOutcome.RETRY
+            else -> SessionRecoveryOutcome.FAIL_TERMINAL
+        }
     }
 
     override suspend fun doWork(): Result {
@@ -166,9 +221,12 @@ class SupabaseUploadWorker(
         // Idempotent: never re-upload a chunk already confirmed DONE.
         if (chunk.supabaseUploadStatus == ChunkStatus.DONE) return Result.success()
 
-        // No Supabase login configured yet (am1-1 not done, or session expired/signed out): fail
-        // safely without marking the chunk FAILED — it stays PENDING. Retrying here via
-        // WorkManager backoff would just burn battery hitting the same wall every time.
+        // No Supabase login configured yet (am1-1 not done, or session expired/signed out): if
+        // recovery below can't restore a session from disk either, fail without marking the
+        // chunk FAILED — it stays PENDING, and a *confirmed* disk-empty session (real sign-out)
+        // does NOT get retried (see decideSessionRecoveryOutcome — retrying that case would just
+        // burn battery hitting the same wall every time). A transient/ambiguous recovery outcome
+        // DOES get a bounded retry now (am-hotfix patch 2) — see below.
         // NOTE (am1-3): this specific gap is NOT covered by am1-3's crash-recovery sweep — that
         // sweep only reverts chunks stuck UPLOADING (mid-flight when the process died), and
         // SupabaseRetryWorker only re-enqueues FAILED chunks. A chunk that never got a Supabase
@@ -185,17 +243,70 @@ class SupabaseUploadWorker(
         // and get stuck PENDING forever ("not signed in"), even though a valid session is already
         // on disk. awaitInitialization() resolves to `sessionStatus.first { it !is
         // SessionStatus.LoadingFromStorage }` and never throws (NetworkError/NotAuthenticated both
-        // resolve normally), so no try/catch is needed here. This is the decisive fix — the
-        // warmup in AudioMemoApplication.onCreate() is only an optimization that makes this a
-        // no-op in the common case. Bounded by AUTH_INIT_TIMEOUT_MS (code review, patch 2): on the
-        // rare chance the underlying disk read hangs, this falls through to the exact same
-        // currentSessionOrNull() == null path as before this hotfix, instead of suspending forever
-        // and holding the WorkManager execution slot.
+        // resolve normally), so no try/catch is needed here. This closes the one-time cold-start
+        // race — the warmup in AudioMemoApplication.onCreate() is only an optimization that makes
+        // this a no-op in the common case. Bounded by AUTH_INIT_TIMEOUT_MS (code review, patch 2):
+        // on the rare chance the underlying disk read hangs, this falls through to the
+        // currentSessionOrNull() == null recovery path below, same as before this hotfix.
         withTimeoutOrNull(AUTH_INIT_TIMEOUT_MS) { supabaseClient.auth.awaitInitialization() }
 
         if (supabaseClient.auth.currentSessionOrNull() == null) {
-            appEventLogger.log(LogCategory.UPLOAD, "Supabase upload skipped: not signed in (chunk=$chunkId)")
-            return Result.failure()
+            // am-hotfix patch 2 (mid-session recurrence, 3-reviewer code review round):
+            // awaitInitialization() only guards the one-time cold-start LoadingFromStorage race —
+            // it does NOT explain a session that was Authenticated earlier in this same process
+            // and later reads back null here. Confirmed on device (2026-08-17, this app's own
+            // persisted files/logs/app-events.log, chunks 46-53 in session id 8): recurs
+            // mid-session, on a long-running process, every chunk failing "not signed in" with no
+            // self-recovery — plausibly gotrue-kt's in-memory sessionStatus regressing to
+            // NotAuthenticated after a failed background auto-refresh (AuthImpl.tryImportingSession
+            // has a catch branch that does exactly this instead of NetworkError; verified by
+            // decompiling gotrue-kt 2.2.3) while the persisted session on disk stays perfectly
+            // good. loadFromStorage() is the same public primitive the SDK uses internally to
+            // populate the session on cold start (decompiled AuthImpl.init) — calling it again
+            // here forces a fresh disk re-read into memory. Its own boolean return only reflects
+            // whether *disk* had a session (decompiled AuthImpl.loadFromStorage), not whether the
+            // in-memory restore actually succeeded — decideSessionRecoveryOutcome re-checks
+            // currentSessionOrNull() as the authoritative signal instead of trusting that return
+            // value alone (also avoids a narrow race where a concurrent caller restores the
+            // session between this call and the check). Bounded by AUTH_RECOVERY_TIMEOUT_MS for
+            // the same disk-I/O-hang reason as AUTH_INIT_TIMEOUT_MS; any exception from the SDK
+            // call itself (e.g. a network-bound auto-refresh attempt, unlike awaitInitialization()
+            // this call is not documented "never throws") is caught and treated the same as a
+            // timeout — ambiguous, not a confirmed disk-empty signal.
+            val loadFromStorageResult = try {
+                withTimeoutOrNull(AUTH_RECOVERY_TIMEOUT_MS) { supabaseClient.auth.loadFromStorage() }
+            } catch (e: Exception) {
+                null
+            }
+            val sessionRestored = supabaseClient.auth.currentSessionOrNull() != null
+
+            when (decideSessionRecoveryOutcome(sessionRestored, loadFromStorageResult, runAttemptCount)) {
+                SessionRecoveryOutcome.PROCEED -> appEventLogger.log(
+                    LogCategory.UPLOAD,
+                    "Supabase session recovered via loadFromStorage (chunk=$chunkId)"
+                )
+                SessionRecoveryOutcome.FAIL_FAST -> {
+                    appEventLogger.log(
+                        LogCategory.UPLOAD,
+                        "Supabase upload skipped: not signed in, no session in storage (chunk=$chunkId)"
+                    )
+                    return Result.failure()
+                }
+                SessionRecoveryOutcome.RETRY -> {
+                    appEventLogger.log(
+                        LogCategory.UPLOAD,
+                        "Supabase upload skipped: not signed in, retrying (chunk=$chunkId, attempt=$runAttemptCount)"
+                    )
+                    return Result.retry()
+                }
+                SessionRecoveryOutcome.FAIL_TERMINAL -> {
+                    appEventLogger.log(
+                        LogCategory.UPLOAD,
+                        "Supabase upload skipped: not signed in, giving up (chunk=$chunkId, attempt=$runAttemptCount)"
+                    )
+                    return Result.failure()
+                }
+            }
         }
 
         chunkDao.updateSupabaseUploadStatus(chunkId, ChunkStatus.UPLOADING)
