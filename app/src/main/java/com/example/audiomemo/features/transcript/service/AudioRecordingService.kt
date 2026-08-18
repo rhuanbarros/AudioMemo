@@ -1,5 +1,6 @@
 package com.example.audiomemo.features.transcript.service
 
+import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -46,10 +47,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class AudioRecordingService : Service() {
+
+    /**
+     * Outcome of [runHardwareRecoveryLoop] — what [handleHardwareError] branches on.
+     *
+     * Deliberately nested directly on the class, never inside `companion object` (mirrors
+     * [AudioRecorderManager.ChunkAmplitudeOutcome]'s KDoc, same pitfall): a class/enum nested
+     * inside a companion object is only reachable from other files as
+     * `AudioRecordingService.Companion.HardwareRecoveryResult`, not the shorter
+     * `AudioRecordingService.HardwareRecoveryResult` this type's test callers use — unlike plain
+     * functions/properties, Kotlin does not promote nested *types* out of a companion object.
+     */
+    internal enum class HardwareRecoveryResult { RECOVERED, STORAGE_INSUFFICIENT, EXHAUSTED }
 
     companion object {
         const val ACTION_STOP = "com.example.audiomemo.action.STOP_RECORDING"
@@ -114,6 +128,114 @@ class AudioRecordingService : Service() {
         internal fun shouldEnqueueSupabaseUpload(
             outcome: AudioRecorderManager.ChunkAmplitudeOutcome
         ): Boolean = outcome != AudioRecorderManager.ChunkAmplitudeOutcome.SILENT
+
+        /**
+         * (am-hotfix, never-stop-recording) Bounded immediate-recovery attempts for a hardware
+         * error before falling back to a real stop + alert notification. Chosen to match this
+         * project's existing "3 attempts" convention
+         * ([com.example.audiomemo.features.cloudsync.data.worker.SupabaseUploadWorker]'s
+         * `decideUploadOutcome`/`SessionRecoveryOutcome`) rather than inventing an unrelated
+         * number — the story's Ask-First clause is about a decision with no obvious answer; this
+         * one already has a project-wide precedent. Not blocking on the owner for this reason,
+         * but flagged explicitly in the closing report so the owner can override if 3 attempts
+         * ~1s apart don't hold up during real-device verification.
+         */
+        internal const val HARDWARE_RECOVERY_MAX_ATTEMPTS = 3
+
+        /** Delay between immediate-recovery attempts — "seconds, not minutes" per the story. */
+        internal const val HARDWARE_RECOVERY_RETRY_DELAY_MS = 1_000L
+
+        /**
+         * Pure sentinel predicate (am-hotfix, never-stop-recording, FR2/heartbeat-as-sentinel):
+         * recording counts as unhealthy only when it's neither deliberately stopped nor
+         * deliberately paused via the physical media button — those are legitimate reasons
+         * [AudioRecorderManager.isRecording] is `false`. Extracted pure/`Context`-free so it's
+         * unit-testable from plain-JVM `src/test`, mirroring every other pure decision in this
+         * class (e.g. [shouldEnqueueSupabaseUpload], [computeChunkSizeKb]).
+         */
+        internal fun isRecordingUnhealthy(
+            isStopped: Boolean,
+            isMediaButtonPaused: Boolean,
+            recorderIsRecording: Boolean
+        ): Boolean = !isStopped && !isMediaButtonPaused && !recorderIsRecording
+
+        // ── Stop-reason log messages (code review patch 2 — cross-file coupling) ────────────
+        // Single source of truth for the exact INTERRUPTION-category log text each genuine stop
+        // emits. `HomeViewModel.classifyEvent`'s health-strip classifier keys off these (a
+        // "— recording stopped" suffix, see that file), and `HomeViewModelTest` derives its
+        // expectations from these same constants/function instead of hand-typing copies — so a
+        // future edit to this text can't silently desync the two files again.
+
+        internal const val LOW_STORAGE_STOPPED_MESSAGE = "Low storage — recording stopped"
+        internal const val PERMISSION_REVOKED_STOPPED_MESSAGE = "Permission revoked — recording stopped"
+
+        /** Battery-low is no longer a stop (am-hotfix, never-stop-recording) — observability only,
+         *  deliberately does NOT end in "— recording stopped" so it's never misclassified ERROR. */
+        internal const val BATTERY_LOW_CONTINUES_MESSAGE =
+            "Battery low — recording continues (no longer a stop trigger)"
+
+        internal fun hardwareErrorStoppedMessage(maxAttempts: Int = HARDWARE_RECOVERY_MAX_ATTEMPTS): String =
+            "Hardware error unrecoverable after $maxAttempts immediate attempts — recording stopped"
+
+        /**
+         * Generic, `Context`-free re-entrancy guard (code review patch 3/4): runs [action] only if
+         * [guard] can be atomically flipped `false -> true` (rejects a concurrent/overlapping call
+         * by returning `null` without running [action] at all), and — critically — only flips
+         * [guard] back to `false` in a `finally` AFTER [action] has *fully* completed, including
+         * whatever asynchronous-looking tail it runs synchronously before returning. This closes
+         * the window the original implementation had: clearing the guard immediately after the
+         * recovery attempts returned, but BEFORE the fallback "stop for real" branch had actually
+         * run, let a fresh trigger landing in that gap start a second, overlapping recovery loop
+         * while the first was still tearing the service down.
+         *
+         * Kept generic/`AtomicBoolean`-parameterized (not hardcoded to
+         * [isRecoveringFromHardwareError]) so it's unit-testable from plain-JVM `src/test` with a
+         * throwaway `AtomicBoolean`, without needing a real `AudioRecordingService`/`Context`.
+         */
+        internal suspend fun <T> runGuarded(guard: AtomicBoolean, action: suspend () -> T): T? {
+            if (!guard.compareAndSet(false, true)) return null
+            return try {
+                action()
+            } finally {
+                guard.set(false)
+            }
+        }
+
+        /**
+         * Pure, `Context`-free retry-loop orchestration (code review patch 7/9/11) extracted out
+         * of the suspend instance method so the attempt-counting / early-exit / no-delay-before-
+         * first-attempt behavior is unit-testable from plain-JVM `src/test` with a fake [attempt]
+         * lambda, without needing a real [AudioRecorderManager]/`Context` (this project has no
+         * Robolectric/androidTest infra — see `AudioRecordingServiceConflictResolutionTest`'s
+         * docblock for the established rationale).
+         *
+         * (Patch 7): no delay before the very first attempt — a function documented as
+         * "fast"/"immediate" must actually try immediately; only attempts after the first wait
+         * [retryDelayMs] apart.
+         *
+         * (Patch 9): reports the *last* observed [AudioRecorderManager.RecoveryOutcome] once every
+         * attempt is exhausted, so a caller can tell "ran out of storage mid-recovery" apart from
+         * a genuine unrecoverable hardware fault and alert accordingly.
+         */
+        internal suspend fun runHardwareRecoveryLoop(
+            maxAttempts: Int,
+            retryDelayMs: Long,
+            attempt: suspend () -> AudioRecorderManager.RecoveryOutcome
+        ): HardwareRecoveryResult {
+            var lastOutcome = AudioRecorderManager.RecoveryOutcome.HARDWARE_FAILURE
+            repeat(maxAttempts) { index ->
+                if (index > 0) delay(retryDelayMs)
+                lastOutcome = attempt()
+                if (lastOutcome == AudioRecorderManager.RecoveryOutcome.RECOVERED) {
+                    return HardwareRecoveryResult.RECOVERED
+                }
+            }
+            return if (lastOutcome == AudioRecorderManager.RecoveryOutcome.STORAGE_INSUFFICIENT) {
+                HardwareRecoveryResult.STORAGE_INSUFFICIENT
+            } else {
+                HardwareRecoveryResult.EXHAUSTED
+            }
+        }
     }
 
     inner class LocalBinder : Binder() {
@@ -147,8 +269,33 @@ class AudioRecordingService : Service() {
 
     /** True while the service is actively recording (not stopped). Used to reject duplicate starts. */
     private var isRecordingActive = false
-    /** True when the user has manually paused via a headset/media button. */
-    private var isMediaButtonPaused = false
+
+    /**
+     * True when the user has manually paused via a headset/media button.
+     *
+     * `@Volatile` (code review, am-hotfix never-stop-recording, patch 6): normally written from
+     * the main thread (media-button/ACTION_RESUME handlers) but now also read every tick by the
+     * heartbeat sentinel running on `serviceScope` (`Dispatchers.IO`) — without `@Volatile` that
+     * cross-thread read isn't guaranteed to see the latest write.
+     */
+    @Volatile private var isMediaButtonPaused = false
+
+    /**
+     * (am-hotfix, never-stop-recording): guards against overlapping immediate-recovery loops.
+     * [AudioRecorderManager]'s async `setOnErrorListener` can fire again while a recovery attempt
+     * is already in flight (e.g. the very retry attempt itself fails); [handleHardwareError] uses
+     * this (via [runGuarded]) to no-op on re-entry rather than starting a second overlapping retry
+     * loop — the loop already in progress will observe the same underlying failure on its own
+     * next attempt.
+     *
+     * `AtomicBoolean`, not `@Volatile Boolean` (code review patch 3 — CRITICAL): a plain
+     * `Volatile` boolean's check-then-set (`if (!flag) { flag = true; ... }`) is two separate,
+     * non-atomic operations — two concurrent callers (the sentinel coroutine vs.
+     * `MediaRecorder`'s own async error-listener thread) could both read `false` before either
+     * writes `true`, both proceeding to start an overlapping recovery loop.
+     * `compareAndSet(false, true)` (see [runGuarded]) is the atomic single-operation fix.
+     */
+    private val isRecoveringFromHardwareError = AtomicBoolean(false)
 
     private val _isStopped = MutableStateFlow(false)
     val isStopped: StateFlow<Boolean> = _isStopped.asStateFlow()
@@ -261,8 +408,6 @@ class AudioRecordingService : Service() {
 
         interruptionManager = AudioInterruptionManager(
             context = this,
-            onPauseRequested = { reason -> handleInterruptionPause(reason) },
-            onResumeRequested = { handleInterruptionResume() },
             onSourceChanged = { name -> handleSourceChanged(name) }
         )
 
@@ -359,6 +504,23 @@ class AudioRecordingService : Service() {
                     Log.w(TAG, "Failed to record heartbeat, will retry next tick", e)
                 }
                 delay(HEARTBEAT_INTERVAL_MS)
+
+                // (am-hotfix, never-stop-recording): the sentinel now also actively checks
+                // recording health every tick, not just writing a liveness timestamp — deferred
+                // until AFTER the first delay (never on the very first iteration) so it can never
+                // race the recorder.startRecording() call a few lines below and false-positive at
+                // startup, before recording has actually begun. If the recorder has silently
+                // stopped while it should still be active (a hardware failure the async
+                // `setOnErrorListener` missed reporting, for whatever reason), self-heal
+                // immediately by reusing the exact same recovery path as a reported hardware
+                // error, instead of waiting up to 15 minutes for RecordingWatchdogWorker.
+                if (isRecordingUnhealthy(_isStopped.value, isMediaButtonPaused, recorder.isRecording)) {
+                    appEventLogger.log(
+                        LogCategory.INTERRUPTION,
+                        "Sentinel detected unhealthy recording — self-healing immediately"
+                    )
+                    handleHardwareError()
+                }
             }
         }
 
@@ -387,48 +549,23 @@ class AudioRecordingService : Service() {
     }
 
     // ── Interruption handlers ──────────────────────────────────────────────────
+    // (am-hotfix, never-stop-recording): handleInterruptionPause was removed entirely —
+    // AudioInterruptionManager no longer has any pause trigger to call it (audio focus / mic
+    // mute / phone call are no longer intentional-pause reasons; see that class's KDoc).
+    // handleInterruptionResume stays: it's still the target of the "Resume" action on the
+    // media-button-pause notification (ACTION_RESUME → here), an unrelated, still-existing
+    // feature.
 
-    private fun handleInterruptionPause(reason: AudioInterruptionManager.PauseReason) {
-        if (_isStopped.value) return
-        appEventLogger.log(LogCategory.INTERRUPTION, "Recording paused: $reason")
-        recorder.pauseRecording()
-        silenceDetector.stop()
-        serviceScope.launch { sessionStateManager.pauseSession() }
-
-        val notification = when (reason) {
-            AudioInterruptionManager.PauseReason.PHONE_CALL ->
-                NotificationHelper.buildPausedPhoneCallNotification(
-                    this, resumePendingIntent(), stopPendingIntent()
-                )
-            AudioInterruptionManager.PauseReason.AUDIO_FOCUS ->
-                NotificationHelper.buildPausedAudioFocusNotification(
-                    this, resumePendingIntent(), stopPendingIntent()
-                )
-            AudioInterruptionManager.PauseReason.MIC_MUTED ->
-                NotificationHelper.buildPausedMicMutedNotification(
-                    this, resumePendingIntent(), stopPendingIntent()
-                )
-        }
-        NotificationHelper.updateNotification(this, notification)
-    }
-
+    /**
+     * (code review patch 10): the old `if (isMediaButtonPaused) { ... }` early-return branch here
+     * was removed as dead code — this function's only caller (`ACTION_RESUME` in
+     * [onStartCommand]) unconditionally sets `isMediaButtonPaused = false` immediately before
+     * calling it, so that branch could never actually run. (It dated from when
+     * `AudioInterruptionManager`'s now-removed pause/resume callbacks could also reach this
+     * function without having cleared the flag first — see that class's KDoc.)
+     */
     private fun handleInterruptionResume() {
         if (_isStopped.value) return
-        // If the user has manually paused via headset button, keep the recorder paused
-        // and show the media-button pause notification instead of resuming.
-        if (isMediaButtonPaused) {
-            appEventLogger.log(
-                LogCategory.INTERRUPTION,
-                "Interruption cleared, but recording stays paused (media button)"
-            )
-            NotificationHelper.updateNotification(
-                this,
-                NotificationHelper.buildPausedMediaButtonNotification(
-                    this, resumePendingIntent(), stopPendingIntent()
-                )
-            )
-            return
-        }
         appEventLogger.log(LogCategory.INTERRUPTION, "Recording resumed")
         recorder.resumeRecording()
         silenceDetector.reset()
@@ -464,8 +601,10 @@ class AudioRecordingService : Service() {
     private fun handleMediaButtonPlay() {
         if (_isStopped.value || !isMediaButtonPaused) return
         isMediaButtonPaused = false
-        // Only physically resume the recorder if no other interruption (call/focus/mic) is
-        // still active. If one is, handleInterruptionResume will resume when it clears.
+        // (code review patch 10, comment fix): defensive check only, not a real race with any
+        // other pause mechanism — audio-focus/mic-mute/phone-call are no longer intentional-pause
+        // reasons at all (see AudioInterruptionManager's KDoc), so this is purely the media-button
+        // pause's own resume, guarding against a redundant resumeRecording() call.
         if (!recorder.isRecording) {
             recorder.resumeRecording()
             silenceDetector.reset()
@@ -506,33 +645,38 @@ class AudioRecordingService : Service() {
         )
     }
 
+    /**
+     * (am-hotfix, never-stop-recording): battery level is purely an app-policy decision — the
+     * Android system never kills a foreground service just because the battery is low (confirmed
+     * in this story's Problem statement). Recording continues uninterrupted; this handler is now
+     * observability-only. [BatteryGuard] itself is unchanged (still detects the same conditions —
+     * only what happens *after* detection changed, per the story's Code Map).
+     */
     private fun handleBatteryLow() {
-        appEventLogger.log(LogCategory.INTERRUPTION, "Battery low — recording stopped")
-        recorder.stopRecording()
-        silenceDetector.stop()
-        interruptionManager.stop()
-        batteryGuard.stop()
-        val sessionId = sessionStateManager.currentSessionId
-        val savedChunkJob = lastChunkSaveJob
-        serviceScope.launch {
-            savedChunkJob?.join()
-            sessionStateManager.stopSession()
-            cancelFinalizationWorker(sessionId)
-            enqueueTranscriptionChain(sessionId)
-        }
-        _isStopped.value = true
-
-        NotificationHelper.updateNotification(
-            this,
-            NotificationHelper.buildBatteryLowNotification(this)
-        )
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
+        appEventLogger.log(LogCategory.INTERRUPTION, BATTERY_LOW_CONTINUES_MESSAGE)
     }
 
-    private fun handleLowStorage() {
-        appEventLogger.log(LogCategory.INTERRUPTION, "Low storage — recording stopped")
-        recorder.stopRecording()
+    /**
+     * Shared "genuine stop" tail (am-hotfix, never-stop-recording) for the stop reasons that
+     * remain real Android restrictions: low storage, permission revoked, and hardware error
+     * exhausted after immediate-recovery attempts. Always shows [notification] on
+     * [NotificationHelper.ALERT_CHANNEL_ID] (high priority, distinct sound) — never the silent
+     * recording channel — so the owner actually notices when recording genuinely stopped.
+     *
+     * [resolveLostChunkForSessionId] mirrors handleHardwareError's pre-existing CRITICAL fix
+     * (code review, am3-5, patch 1): pass a valid sessionId only for the hardware-error path,
+     * where a chunk's Room row can be stuck `RECORDING` if `onChunkStarted` fired right before
+     * `MediaRecorder.start()` failed — must be resolved to `FAILED` before the session below is
+     * marked `STOPPED`, or no sweep could ever reach it again.
+     *
+     * Idempotency guard (code review patch 8): the hardware-error path is now deliberately slower
+     * (waits through the full retry loop before ever reaching here), which widens the window for
+     * two concurrent triggers (e.g. low-storage AND permission-revoked close together) to both
+     * reach this function — without the guard, both would double-run the stop/notification/
+     * `stopSelf()` sequence.
+     */
+    private fun stopServiceWithAlert(notification: Notification, resolveLostChunkForSessionId: Long? = null) {
+        if (_isStopped.value) return
         silenceDetector.stop()
         interruptionManager.stop()
         batteryGuard.stop()
@@ -540,67 +684,8 @@ class AudioRecordingService : Service() {
         val savedChunkJob = lastChunkSaveJob
         serviceScope.launch {
             savedChunkJob?.join()
-            sessionStateManager.stopSession()
-            cancelFinalizationWorker(sessionId)
-            enqueueTranscriptionChain(sessionId)
-        }
-        _isStopped.value = true
-
-        NotificationHelper.updateNotification(
-            this,
-            NotificationHelper.buildLowStorageNotification(this)
-        )
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
-    }
-
-    private fun handlePermissionRevoked() {
-        appEventLogger.log(LogCategory.INTERRUPTION, "Permission revoked — recording stopped")
-        recorder.stopRecording()
-        silenceDetector.stop()
-        interruptionManager.stop()
-        batteryGuard.stop()
-        val sessionId = sessionStateManager.currentSessionId
-        val savedChunkJob = lastChunkSaveJob
-        serviceScope.launch {
-            savedChunkJob?.join()
-            sessionStateManager.stopSession()
-            cancelFinalizationWorker(sessionId)
-            enqueueTranscriptionChain(sessionId)
-        }
-        _isStopped.value = true
-
-        NotificationHelper.updateNotification(
-            this,
-            NotificationHelper.buildPermissionRevokedNotification(this)
-        )
-        stopForeground(STOP_FOREGROUND_DETACH)
-        stopSelf()
-    }
-
-    private fun handleHardwareError() {
-        appEventLogger.log(LogCategory.INTERRUPTION, "Hardware error — recording stopped")
-        silenceDetector.stop()
-        interruptionManager.stop()
-        batteryGuard.stop()
-        val sessionId = sessionStateManager.currentSessionId
-        val savedChunkJob = lastChunkSaveJob
-        serviceScope.launch {
-            savedChunkJob?.join()
-            // (code review, am3-5, patch 1 — CRITICAL): this path deliberately never calls
-            // recorder.stopRecording() (the recorder may already be broken) — it never routes
-            // through AudioRecorderManager.finaliseCurrentChunk(), unlike every other stop
-            // handler in this class. If onChunkStarted already created a RECORDING row for the
-            // in-flight chunk right before MediaRecorder.start() failed, that row must be
-            // resolved to FAILED HERE, before the session below is marked STOPPED and its
-            // finalization worker cancelled — after that, no sweep could ever reach it again:
-            // ChunkFinalizationWorker.doWork() early-returns once session.state == STOPPED, the
-            // worker itself is about to be cancelled, and the heartbeat would likely still read
-            // fresh at this exact moment anyway (the service was alive and ticking right up
-            // until the error). Reuses the exact same resolution logic the worker's own sweep
-            // uses (see ChunkFinalizationWorker.resolveLostChunks's KDoc), not a duplicate copy.
-            if (sessionId > 0L) {
-                ChunkFinalizationWorker.resolveLostChunks(chunkDao, appEventLogger, sessionId)
+            if (resolveLostChunkForSessionId != null && resolveLostChunkForSessionId > 0L) {
+                ChunkFinalizationWorker.resolveLostChunks(chunkDao, appEventLogger, resolveLostChunkForSessionId)
             }
             sessionStateManager.stopSession()
             cancelFinalizationWorker(sessionId)
@@ -608,13 +693,96 @@ class AudioRecordingService : Service() {
         }
         _isStopped.value = true
 
-        NotificationHelper.updateNotification(
-            this,
-            NotificationHelper.buildHardwareErrorNotification(this)
-        )
+        NotificationHelper.updateNotification(this, notification)
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf()
     }
+
+    private fun handleLowStorage() {
+        appEventLogger.log(LogCategory.INTERRUPTION, LOW_STORAGE_STOPPED_MESSAGE)
+        recorder.stopRecording()
+        stopServiceWithAlert(NotificationHelper.buildLowStorageNotification(this))
+    }
+
+    private fun handlePermissionRevoked() {
+        appEventLogger.log(LogCategory.INTERRUPTION, PERMISSION_REVOKED_STOPPED_MESSAGE)
+        recorder.stopRecording()
+        stopServiceWithAlert(NotificationHelper.buildPermissionRevokedNotification(this))
+    }
+
+    /**
+     * (am-hotfix, never-stop-recording): a hardware error is no longer an immediate stop. It
+     * first tries [attemptImmediateHardwareRecovery] — a short, bounded retry loop reusing
+     * [AudioRecorderManager.attemptImmediateRecovery] — and only falls back to a real stop +
+     * alert notification once that loop is exhausted. [RecordingWatchdogWorker] (15 min) remains
+     * the final safety net for whatever this immediate path can't recover from (e.g. the process
+     * itself gets killed mid-recovery) — this is a faster COMPLEMENT, not a replacement.
+     *
+     * [isRecoveringFromHardwareError] (via [runGuarded]) guards re-entrancy: the async
+     * `MediaRecorder.setOnErrorListener` (or the sentinel below) can call this again while a
+     * recovery attempt is already in flight — that must never start a second overlapping loop,
+     * and (code review patch 4) the guard only releases once this ENTIRE flow — recovery attempts
+     * AND the fallback stop, if it happens — has fully completed.
+     */
+    private fun handleHardwareError() {
+        serviceScope.launch {
+            runGuarded(isRecoveringFromHardwareError) {
+                appEventLogger.log(
+                    LogCategory.INTERRUPTION,
+                    "Hardware error detected — attempting immediate recovery"
+                )
+                when (attemptImmediateHardwareRecovery()) {
+                    HardwareRecoveryResult.RECOVERED -> {
+                        appEventLogger.log(
+                            LogCategory.RECORDING,
+                            "Recovered from hardware error — recording resumed"
+                        )
+                    }
+                    HardwareRecoveryResult.STORAGE_INSUFFICIENT -> {
+                        // (code review patch 9): the recovery loop's last attempt failed
+                        // specifically because storage ran out, not because of a genuine hardware
+                        // fault — surface that distinction (a low-storage alert, not "microphone
+                        // error") and reuse LOW_STORAGE_STOPPED_MESSAGE so this classifies
+                        // identically to the direct low-storage path in HomeViewModel.
+                        appEventLogger.log(
+                            LogCategory.INTERRUPTION,
+                            "Hardware error recovery aborted: storage ran out mid-recovery"
+                        )
+                        appEventLogger.log(LogCategory.INTERRUPTION, LOW_STORAGE_STOPPED_MESSAGE)
+                        // (code review, am3-5, patch 1 — CRITICAL): resolveLostChunkForSessionId
+                        // still applies here — an in-flight chunk's Room row can be stuck
+                        // RECORDING regardless of which specific reason recovery failed for.
+                        stopServiceWithAlert(
+                            NotificationHelper.buildLowStorageNotification(this@AudioRecordingService),
+                            resolveLostChunkForSessionId = sessionStateManager.currentSessionId
+                        )
+                    }
+                    HardwareRecoveryResult.EXHAUSTED -> {
+                        appEventLogger.log(LogCategory.INTERRUPTION, hardwareErrorStoppedMessage())
+                        // (code review, am3-5, patch 1 — CRITICAL): this path deliberately never
+                        // calls recorder.stopRecording() (the recorder may already be broken) —
+                        // it never routes through AudioRecorderManager.finaliseCurrentChunk(),
+                        // unlike every other stop handler in this class.
+                        stopServiceWithAlert(
+                            NotificationHelper.buildHardwareErrorNotification(this@AudioRecordingService),
+                            resolveLostChunkForSessionId = sessionStateManager.currentSessionId
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Thin instance wrapper around [runHardwareRecoveryLoop], supplying this service's real
+     * [AudioRecorderManager.attemptImmediateRecovery] as the attempt function.
+     */
+    private suspend fun attemptImmediateHardwareRecovery(): HardwareRecoveryResult =
+        runHardwareRecoveryLoop(
+            maxAttempts = HARDWARE_RECOVERY_MAX_ATTEMPTS,
+            retryDelayMs = HARDWARE_RECOVERY_RETRY_DELAY_MS,
+            attempt = { recorder.attemptImmediateRecovery() }
+        )
 
     /** Normal stop via user action (Stop button or ACTION_STOP intent). */
     private fun stopRecordingCleanly() {

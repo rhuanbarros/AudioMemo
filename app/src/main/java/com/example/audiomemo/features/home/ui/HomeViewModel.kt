@@ -83,12 +83,25 @@ class HomeViewModel @Inject constructor(
          *  documentar a escolha final". */
         internal const val OFFLINE_INFERENCE_WINDOW_MS = 5 * 60 * 1000L
 
-        private val ERROR_MESSAGES = setOf(
-            "Battery low — recording stopped",
-            "Low storage — recording stopped",
-            "Permission revoked — recording stopped",
-            "Hardware error — recording stopped"
-        )
+        /**
+         * (Code review, am-hotfix never-stop-recording, patch 2): every genuine "recording
+         * stopped for a real reason" `INTERRUPTION`-category message
+         * [AudioRecordingService] emits ends with this exact suffix — `LOW_STORAGE_STOPPED_MESSAGE`,
+         * `PERMISSION_REVOKED_STOPPED_MESSAGE`, and `hardwareErrorStoppedMessage(...)` all share it
+         * by construction. A suffix check (not an exact-string allowlist like the old
+         * `ERROR_MESSAGES` set) means a future edit to the exact wording — e.g. interpolating the
+         * attempt count into the hardware-error message, as this same story just did — can never
+         * again silently desync this classifier from the producer without a test failing; the old
+         * set-membership version broke exactly that way (confirmed independently by 2 reviewers)
+         * and `HomeViewModelTest`'s hand-typed fixtures didn't catch it.
+         *
+         * Deliberately does NOT match "Recording stopped" (no dash — that's the separate
+         * `RECORDING`-category explicit-stop message, handled by its own branch below as
+         * [HealthState.PAUSED]) nor battery-low's current message (`BATTERY_LOW_CONTINUES_MESSAGE`
+         * — battery-low no longer stops anything, so it must never classify as [HealthState.ERROR]
+         * again; it doesn't end in this suffix by construction).
+         */
+        private const val STOPPED_FOR_REAL_REASON_SUFFIX = "— recording stopped"
 
         /**
          * Maps a single [LogEvent] to the [HealthState] it sets going forward, or `null` when the
@@ -109,7 +122,7 @@ class HomeViewModel @Inject constructor(
                 HealthState.PAUSED
             event.category == LogCategory.INTERRUPTION && event.message == "Recording resumed" ->
                 HealthState.RECORDING
-            event.category == LogCategory.INTERRUPTION && event.message in ERROR_MESSAGES ->
+            event.category == LogCategory.INTERRUPTION && event.message.endsWith(STOPPED_FOR_REAL_REASON_SUFFIX) ->
                 HealthState.ERROR
             else -> null
         }

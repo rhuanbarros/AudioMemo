@@ -119,8 +119,18 @@ class AudioRecorderManager(private val context: Context) {
      */
     private val maxAmplitudeInChunk = AtomicInteger(0)
 
-    /** True while the recorder is actively capturing audio (false when paused or stopped). */
-    var isRecording: Boolean = false
+    /**
+     * True while the recorder is actively capturing audio (false when paused or stopped).
+     *
+     * `@Volatile` (code review, am-hotfix never-stop-recording, patch 1/6): written from the
+     * async `MediaRecorder.setOnErrorListener` callback thread AND from
+     * `AudioRecordingService`'s `serviceScope` (`Dispatchers.IO`) coroutine that drives the
+     * immediate-recovery loop, but read by the heartbeat sentinel running on yet another
+     * coroutine on the same dispatcher — without `@Volatile` a write on one thread isn't
+     * guaranteed visible to a read on another (JMM), which would let the sentinel miss exactly
+     * the "recorder silently stopped" case it exists to catch.
+     */
+    @Volatile var isRecording: Boolean = false
         private set
 
     /**
@@ -221,7 +231,19 @@ class AudioRecorderManager(private val context: Context) {
         chunkJob = null
     }
 
-    private fun startNewChunk() {
+    /**
+     * Creates and starts a brand-new chunk's `MediaRecorder`. Returns `true` once `start()`
+     * returns without throwing (recording is healthy), `false` on any failure.
+     *
+     * [notifyOnHardwareError] (am-hotfix, never-stop-recording): defaults to `true` for every
+     * normal caller (chunk rotation, [startRecording], [resumeRecording]) — unchanged behavior,
+     * routes a failure to [onHardwareError] exactly like before. [attemptImmediateRecovery] below
+     * passes `false`: it drives its own short, bounded retry loop from
+     * [com.example.audiomemo.features.transcript.service.AudioRecordingService] and must decide
+     * for itself when to give up, so a failing attempt here must never recursively re-trigger the
+     * handler that's already running that loop.
+     */
+    private fun startNewChunk(notifyOnHardwareError: Boolean = true): Boolean {
         finaliseCurrentChunk(label = "chunk")
         // am4-2 (FR9): reset right after finalising the previous chunk (which reads this same
         // var) and before the new chunk's MediaRecorder is created below, so amplitudeJob starts
@@ -232,6 +254,7 @@ class AudioRecorderManager(private val context: Context) {
         val outputFile = File(context.filesDir, "audio_chunk_$timestamp.m4a")
         currentOutputFile = outputFile
 
+        var started = false
         mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(context)
         } else {
@@ -243,9 +266,22 @@ class AudioRecorderManager(private val context: Context) {
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             setOutputFile(outputFile.absolutePath)
             setOnErrorListener { _, _, _ ->
-                Log.e("AudioRecorderManager", "MediaRecorder hardware error — stopping recording")
+                Log.e("AudioRecorderManager", "MediaRecorder hardware error")
+                // (code review, patch 1 — CRITICAL): isRecording must flip false here — this is
+                // the exact "recorder silently stopped" case the heartbeat sentinel
+                // (AudioRecordingService.isRecordingUnhealthy) exists to catch. Previously only
+                // pauseRecording()/stopRecording() ever cleared it, so a real async hardware
+                // error left isRecording reading true forever, making the sentinel's whole health
+                // check permanently blind to the scenario its own KDoc describes.
+                isRecording = false
                 cancelMonitoringJobs()
-                onHardwareError?.invoke()
+                // (code review, patch 5): gate on the SAME notifyOnHardwareError this specific
+                // startNewChunk() call was made with — a chunk created via attemptImmediateRecovery
+                // (notifyOnHardwareError = false) must never have ITS async error listener
+                // re-trigger onHardwareError either; only the synchronous prepare()/start() catch
+                // below was gated before, leaving this async path free to recursively re-enter the
+                // very recovery-loop handler that's already driving the retries.
+                if (notifyOnHardwareError) onHardwareError?.invoke()
             }
             try {
                 prepare()
@@ -254,11 +290,61 @@ class AudioRecorderManager(private val context: Context) {
                 // kill mid-chunk left no trace of the chunk anywhere in Room.
                 onChunkStarted?.invoke(outputFile.absolutePath)
                 start()
+                started = true
             } catch (e: Exception) {
                 e.printStackTrace()
-                onHardwareError?.invoke()
+                // (code review, patch 1 — CRITICAL): same isRecording=false fix as the async
+                // listener above, for the synchronous failure path.
+                isRecording = false
+                // (am-hotfix, never-stop-recording): also cancel monitoring jobs on this
+                // synchronous failure path — previously only the async setOnErrorListener above
+                // did this, leaving amplitudeJob/chunkJob running against a broken/null recorder
+                // if prepare()/start() threw here instead. Mirrors the listener's own cleanup.
+                cancelMonitoringJobs()
+                if (notifyOnHardwareError) onHardwareError?.invoke()
             }
         }
+        return started
+    }
+
+    /**
+     * Outcome of [attemptImmediateRecovery] (code review, am-hotfix never-stop-recording, patch
+     * 9): distinguishes a genuine unrecoverable hardware fault from running out of disk space
+     * mid-recovery. Both make the attempt fail, but they're different, differently-actionable
+     * causes — [AudioRecordingService]'s eventual give-up alert should say "low storage", not a
+     * generic "microphone error", when that's what actually happened.
+     */
+    enum class RecoveryOutcome {
+        /** A new chunk's `MediaRecorder` started successfully — recording is healthy again. */
+        RECOVERED,
+        /** [StorageGuard] reports insufficient free space — a real restriction, not retried. */
+        STORAGE_INSUFFICIENT,
+        /** `prepare()`/`start()` failed for a reason other than storage. */
+        HARDWARE_FAILURE
+    }
+
+    /**
+     * (am-hotfix, never-stop-recording): fast, bounded recovery attempt after a hardware error —
+     * reuses the exact same `prepare()`/`start()` path every normal chunk rotation already goes
+     * through ([startNewChunk]), but never invokes [onHardwareError] itself on failure (see
+     * [startNewChunk]'s `notifyOnHardwareError` KDoc). [AudioRecordingService] drives the actual
+     * bounded retry loop (a few attempts, seconds apart) and falls back to a real stop + alert
+     * notification only once that loop is exhausted.
+     *
+     * Re-checks storage first via [StorageGuard] since a hardware error can coincide with
+     * genuinely running out of disk space — a real restriction, not something worth retrying
+     * against — and reports that distinctly as [RecoveryOutcome.STORAGE_INSUFFICIENT].
+     *
+     * On [RecoveryOutcome.RECOVERED], flips [isRecording] back to `true` and restarts the
+     * monitoring jobs if they aren't already active.
+     */
+    fun attemptImmediateRecovery(): RecoveryOutcome {
+        if (!StorageGuard.hasEnoughStorage(context.filesDir)) return RecoveryOutcome.STORAGE_INSUFFICIENT
+        val started = startNewChunk(notifyOnHardwareError = false)
+        if (!started) return RecoveryOutcome.HARDWARE_FAILURE
+        isRecording = true
+        if (amplitudeJob?.isActive != true) startMonitoringJobs()
+        return RecoveryOutcome.RECOVERED
     }
 
     private fun finaliseCurrentChunk(label: String) {

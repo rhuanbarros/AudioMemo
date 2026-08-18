@@ -8,102 +8,46 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
-import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
+import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 
 /**
- * Handles all audio interruption edge cases:
- *  1. Phone call (RINGING / OFFHOOK) → pause; IDLE → resume
- *  2. Audio focus loss (another app takes focus) → pause; AUDIOFOCUS_GAIN → resume
- *  3. Wired headset plug/unplug and ACTION_AUDIO_BECOMING_NOISY → source-changed notification
- *  4. Mic hardware mute toggle (API 27+) → pause; unmute → resume
- *  5. Bluetooth SCO connect/disconnect → source-changed notification + SCO lifecycle
- *  6. USB audio device attach/detach → source-changed notification
+ * Handles audio source-change observability and (am-hotfix, never-stop-recording) phone-state
+ * observability. Recording itself is never paused/stopped by anything in this class anymore —
+ * per the owner's permanent rule ("a gravação nunca deve desistir por escolha própria"), audio
+ * focus loss, microphone hardware mute, and phone calls are all *policy*, never a real Android
+ * restriction that actually makes the microphone unavailable, so none of them pause recording:
+ *  1. Phone call (RINGING / OFFHOOK / IDLE) → logged for observability only, never pauses. If the
+ *     Android system genuinely revokes microphone access during a call (rare, OEM-dependent),
+ *     that surfaces as a real `MediaRecorder` hardware error instead, which
+ *     [AudioRecordingService] now recovers from immediately rather than treating as an
+ *     intentional pause.
+ *  2. Wired headset plug/unplug and ACTION_AUDIO_BECOMING_NOISY → source-changed notification
+ *  3. Bluetooth SCO connect/disconnect → source-changed notification + SCO lifecycle
+ *  4. USB audio device attach/detach → source-changed notification
+ *
+ * Audio focus requests and microphone-hardware-mute detection were removed entirely (not just
+ * disabled) — see `am-hotfix-never-stop-recording.md`'s Code Map. Neither one is a real Android
+ * restriction: another app taking audio focus never makes the microphone physically unavailable,
+ * and a muted mic just means the captured audio is quiet (the existing silent-chunk skip already
+ * handles that case), not that recording should stop.
  */
 class AudioInterruptionManager(
     private val context: Context,
-    private val onPauseRequested: (PauseReason) -> Unit,
-    private val onResumeRequested: () -> Unit,
     private val onSourceChanged: (sourceName: String) -> Unit
 ) {
-    enum class PauseReason { PHONE_CALL, AUDIO_FOCUS, MIC_MUTED }
-
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
 
-    @Volatile private var pausedForCall = false
-    @Volatile private var pausedForFocus = false
-    @Volatile private var pausedForMicMute = false
-
-    private fun shouldResume() = !pausedForCall && !pausedForFocus && !pausedForMicMute
-
-    // ── Audio Focus ────────────────────────────────────────────────────────────
-
-    private var focusRequest: AudioFocusRequest? = null
-
-    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
-        when (change) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                if (!pausedForFocus) {
-                    pausedForFocus = true
-                    if (!pausedForCall && !pausedForMicMute) onPauseRequested(PauseReason.AUDIO_FOCUS)
-                }
-            }
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                if (pausedForFocus) {
-                    pausedForFocus = false
-                    if (shouldResume()) onResumeRequested()
-                }
-            }
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun requestAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setOnAudioFocusChangeListener(focusChangeListener)
-                .setWillPauseWhenDucked(true)
-                .build()
-            focusRequest = req
-            audioManager.requestAudioFocus(req)
-        } else {
-            audioManager.requestAudioFocus(
-                focusChangeListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN
-            )
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun abandonAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        } else {
-            audioManager.abandonAudioFocus(focusChangeListener)
-        }
-        focusRequest = null
-    }
-
-    // ── Phone State ────────────────────────────────────────────────────────────
+    // ── Phone State (observability only — never pauses recording) ─────────────
 
     private var legacyPhoneListener: PhoneStateListener? = null
     private var modernPhoneCallback: TelephonyCallback? = null
@@ -142,30 +86,23 @@ class AudioInterruptionManager(
         telephonyManager.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
     }
 
+    /**
+     * (am-hotfix, never-stop-recording): deliberately logs only, never pauses. A phone call is a
+     * real Android restriction ONLY in the rare case the system yanks microphone access away from
+     * this app during the call — and that surfaces as a genuine `MediaRecorder` hardware error
+     * (via [AudioRecorderManager.onHardwareError]), which [AudioRecordingService] already recovers
+     * from immediately. This listener stays registered purely so call-state transitions are
+     * visible in logcat while investigating recording behavior, per the story's Code Map
+     * ("o listener de TelephonyManager pode continuar existindo só pra fins de log/observabilidade").
+     */
     private fun handleCallState(state: Int) {
-        when (state) {
-            TelephonyManager.CALL_STATE_RINGING,
-            TelephonyManager.CALL_STATE_OFFHOOK -> {
-                if (!pausedForCall) {
-                    pausedForCall = true
-                    onPauseRequested(PauseReason.PHONE_CALL)
-                }
-            }
-            TelephonyManager.CALL_STATE_IDLE -> {
-                if (pausedForCall) {
-                    pausedForCall = false
-                    if (shouldResume()) {
-                        onResumeRequested()
-                    } else if (pausedForFocus) {
-                        // The ringtone or phone app may have taken audio focus before the
-                        // call connected and may never return it. Re-request focus so the
-                        // system re-evaluates; if granted, focusChangeListener will resume.
-                        abandonAudioFocus()
-                        requestAudioFocus()
-                    }
-                }
-            }
+        val label = when (state) {
+            TelephonyManager.CALL_STATE_RINGING -> "RINGING"
+            TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
+            TelephonyManager.CALL_STATE_IDLE -> "IDLE"
+            else -> "UNKNOWN($state)"
         }
+        Log.d(TAG, "Phone call state changed to $label — recording continues uninterrupted")
     }
 
     @Suppress("DEPRECATION")
@@ -217,46 +154,6 @@ class AudioInterruptionManager(
             context.registerReceiver(headsetReceiver, filter)
         }
         headsetReceiverRegistered = true
-    }
-
-    // ── Mic hardware mute toggle (API 27+) ────────────────────────────────────
-
-    private var micMuteReceiverRegistered = false
-
-    private val micMuteReceiver = object : BroadcastReceiver() {
-        override fun onReceive(ctx: Context?, intent: Intent?) {
-            val muted = audioManager.isMicrophoneMute
-            if (muted && !pausedForMicMute) {
-                pausedForMicMute = true
-                if (!pausedForCall && !pausedForFocus) onPauseRequested(PauseReason.MIC_MUTED)
-            } else if (!muted && pausedForMicMute) {
-                pausedForMicMute = false
-                if (shouldResume()) onResumeRequested()
-            }
-        }
-    }
-
-    private fun registerMicMuteReceiver() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return // API 27+
-        val filter = IntentFilter(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(micMuteReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(micMuteReceiver, filter)
-        }
-        micMuteReceiverRegistered = true
-        // Check initial state in case mic was already muted when recording started
-        if (audioManager.isMicrophoneMute) {
-            pausedForMicMute = true
-            if (!pausedForCall && !pausedForFocus) onPauseRequested(PauseReason.MIC_MUTED)
-        }
-    }
-
-    private fun unregisterMicMuteReceiver() {
-        if (micMuteReceiverRegistered) {
-            try { context.unregisterReceiver(micMuteReceiver) } catch (_: Exception) {}
-            micMuteReceiverRegistered = false
-        }
     }
 
     // ── Bluetooth SCO ──────────────────────────────────────────────────────────
@@ -405,25 +302,25 @@ class AudioInterruptionManager(
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     fun start() {
-        requestAudioFocus()
         registerPhoneStateListener()
         registerHeadsetReceiver()
-        registerMicMuteReceiver()
         registerScoReceiver()
         registerUsbReceiver()
         registerAudioDeviceCallback()
     }
 
     fun stop() {
-        abandonAudioFocus()
         unregisterPhoneStateListener()
         if (headsetReceiverRegistered) {
             try { context.unregisterReceiver(headsetReceiver) } catch (_: Exception) {}
             headsetReceiverRegistered = false
         }
-        unregisterMicMuteReceiver()
         unregisterScoReceiver()
         unregisterUsbReceiver()
         unregisterAudioDeviceCallback()
+    }
+
+    private companion object {
+        private const val TAG = "AudioInterruptionMgr"
     }
 }

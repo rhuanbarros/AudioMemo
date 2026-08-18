@@ -4,6 +4,7 @@ import com.example.audiomemo.core.logging.LogCategory
 import com.example.audiomemo.core.logging.LogEvent
 import com.example.audiomemo.features.home.domain.model.HealthState
 import com.example.audiomemo.features.home.ui.state.HealthBanner
+import com.example.audiomemo.features.transcript.service.AudioRecordingService
 import io.kotest.core.spec.style.StringSpec
 
 /**
@@ -136,10 +137,52 @@ class HomeViewModelTest : StringSpec({
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.RECORDING, "Recording stopped")) == HealthState.PAUSED)
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.INTERRUPTION, "Recording paused: MIC_MUTED")) == HealthState.PAUSED)
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.INTERRUPTION, "Recording resumed")) == HealthState.RECORDING)
-        check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.INTERRUPTION, "Battery low — recording stopped")) == HealthState.ERROR)
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.INTERRUPTION, "Permission revoked — recording stopped")) == HealthState.ERROR)
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.UPLOAD, "Supabase upload succeeded (chunk=1)")) == null)
         check(HomeViewModel.classifyEvent(LogEvent(0, LogCategory.INTERRUPTION, "Audio source changed to Bluetooth")) == null)
+    }
+
+    /**
+     * (Code review, am-hotfix never-stop-recording, patch 2): regression coverage for the exact
+     * cross-file drift 2 reviewers found — the old `ERROR_MESSAGES` exact-string set silently
+     * stopped matching once `AudioRecordingService`'s hardware-error-stop message text changed
+     * (it gained the attempt count), and separately kept classifying battery-low as an error even
+     * after battery-low stopped being a stop at all. These cases derive the expected message
+     * straight from `AudioRecordingService`'s own constants/function — not hand-typed copies —
+     * so a future wording change here fails this test instead of silently breaking the Home
+     * screen's health strip.
+     */
+    "classifyEvent tracks AudioRecordingService's real stop messages, not a hand-typed copy" {
+        check(
+            HomeViewModel.classifyEvent(
+                LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.LOW_STORAGE_STOPPED_MESSAGE)
+            ) == HealthState.ERROR
+        ) { "the real low-storage-stop message must classify as ERROR" }
+
+        check(
+            HomeViewModel.classifyEvent(
+                LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.PERMISSION_REVOKED_STOPPED_MESSAGE)
+            ) == HealthState.ERROR
+        ) { "the real permission-revoked-stop message must classify as ERROR" }
+
+        check(
+            HomeViewModel.classifyEvent(
+                LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.hardwareErrorStoppedMessage())
+            ) == HealthState.ERROR
+        ) {
+            "the real hardware-error-stop message (with its interpolated attempt count) must " +
+                "classify as ERROR — this is the exact drift the old exact-string ERROR_MESSAGES " +
+                "set missed"
+        }
+
+        check(
+            HomeViewModel.classifyEvent(
+                LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.BATTERY_LOW_CONTINUES_MESSAGE)
+            ) == null
+        ) {
+            "battery-low no longer stops recording, so its real current message must NOT " +
+                "classify as ERROR (must not classify as any state at all)"
+        }
     }
 
     "currentHealthStatus reports the most recent classifiable event regardless of the 24h window" {
@@ -165,7 +208,7 @@ class HomeViewModelTest : StringSpec({
         // stale future-dated event outrank the real most-recent classifiable one.
         val events = listOf(
             LogEvent(now - hourMs, LogCategory.RECORDING, "Recording started"),
-            LogEvent(now + 10 * hourMs, LogCategory.INTERRUPTION, "Battery low — recording stopped")
+            LogEvent(now + 10 * hourMs, LogCategory.INTERRUPTION, AudioRecordingService.PERMISSION_REVOKED_STOPPED_MESSAGE)
         )
 
         val (state, event) = HomeViewModel.currentHealthStatus(events, now)
