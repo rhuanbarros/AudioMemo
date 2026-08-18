@@ -1,10 +1,15 @@
 package com.example.audiomemo.features.transcript.data.worker
 
+import com.example.audiomemo.data.db.entities.ChunkEntity
+import com.example.audiomemo.features.transcript.domain.model.ChunkStatus
 import io.kotest.core.spec.style.StringSpec
 
 /**
  * Covers [RecordingWatchdogWorker.needsRestart] (am3-2, FR2) — the pure predicate that decides
- * whether the always-on watchdog restarts [com.example.audiomemo.features.transcript.service.AudioRecordingService].
+ * whether the always-on watchdog restarts [com.example.audiomemo.features.transcript.service.AudioRecordingService] —
+ * and [RecordingWatchdogWorker.needsGlobalRetryEnqueue] (hotfix,
+ * `am-hotfix-periodic-supabase-retry-sweep`) — the pure predicate for the watchdog's second
+ * responsibility, the global `FAILED` Supabase-upload retry sweep.
  *
  * **Why this doesn't drive [RecordingWatchdogWorker.doWork] directly:** that method needs a real
  * (or Robolectric-simulated) `android.content.Context` for `EntryPointAccessors.fromApplication`
@@ -99,6 +104,62 @@ class RecordingWatchdogWorkerTest : StringSpec({
 
         check(restart) {
             "a clock that went backward must never mask a genuinely dead service as fresh"
+        }
+    }
+
+    fun chunk(id: Long = 1L, sessionId: Long = 100L, supabaseUploadStatus: ChunkStatus) = ChunkEntity(
+        id = id,
+        sessionId = sessionId,
+        chunkIndex = 0,
+        filePath = "/data/chunks/$id.m4a",
+        status = ChunkStatus.DONE,
+        supabaseUploadStatus = supabaseUploadStatus
+    )
+
+    "needsGlobalRetryEnqueue is true for a FAILED chunk whose local file still exists" {
+        val failedChunk = chunk(supabaseUploadStatus = ChunkStatus.FAILED)
+
+        val needsRetry = RecordingWatchdogWorker.needsGlobalRetryEnqueue(failedChunk, localFileExists = true)
+
+        check(needsRetry) { "a FAILED chunk with a recoverable local file must be re-enqueued" }
+    }
+
+    "needsGlobalRetryEnqueue is true for a FAILED chunk regardless of which session it belongs to" {
+        val oldSessionChunk = chunk(sessionId = 1L, supabaseUploadStatus = ChunkStatus.FAILED)
+        val currentSessionChunk = chunk(sessionId = 999L, supabaseUploadStatus = ChunkStatus.FAILED)
+
+        check(RecordingWatchdogWorker.needsGlobalRetryEnqueue(oldSessionChunk, localFileExists = true)) {
+            "the global sweep must never be scoped to a single session — unlike SupabaseRetryWorker"
+        }
+        check(RecordingWatchdogWorker.needsGlobalRetryEnqueue(currentSessionChunk, localFileExists = true)) {
+            "the global sweep must never be scoped to a single session — unlike SupabaseRetryWorker"
+        }
+    }
+
+    "needsGlobalRetryEnqueue is false for a chunk that isn't FAILED, even with its local file present" {
+        val pendingChunk = chunk(supabaseUploadStatus = ChunkStatus.PENDING)
+        val uploadingChunk = chunk(supabaseUploadStatus = ChunkStatus.UPLOADING)
+        val doneChunk = chunk(supabaseUploadStatus = ChunkStatus.DONE)
+
+        check(!RecordingWatchdogWorker.needsGlobalRetryEnqueue(pendingChunk, localFileExists = true)) {
+            "a PENDING chunk is already queued for upload — never re-enqueue it here"
+        }
+        check(!RecordingWatchdogWorker.needsGlobalRetryEnqueue(uploadingChunk, localFileExists = true)) {
+            "an UPLOADING chunk is mid-flight — never re-enqueue it here"
+        }
+        check(!RecordingWatchdogWorker.needsGlobalRetryEnqueue(doneChunk, localFileExists = true)) {
+            "a DONE chunk already uploaded successfully — never re-enqueue it here"
+        }
+    }
+
+    "needsGlobalRetryEnqueue is false for a FAILED chunk whose local file no longer exists" {
+        val failedChunk = chunk(supabaseUploadStatus = ChunkStatus.FAILED)
+
+        val needsRetry = RecordingWatchdogWorker.needsGlobalRetryEnqueue(failedChunk, localFileExists = false)
+
+        check(!needsRetry) {
+            "a permanently unrecoverable chunk (local file gone) must never be retried forever " +
+                "— SupabaseUploadWorker would just fail it again for the same reason every tick"
         }
     }
 })
