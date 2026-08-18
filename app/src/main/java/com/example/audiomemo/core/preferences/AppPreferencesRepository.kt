@@ -42,13 +42,28 @@ class AppPreferencesRepository @Inject constructor(
     }
 
     /**
-     * The owner's persisted intent: "recording should be active". Only ever set `true` when the
-     * owner explicitly starts recording via the UI, and only ever set back to `false` when they
-     * explicitly stop it — no always-on mechanism (watchdog, boot receiver) may set this itself.
-     * Defaults to `false` (nothing started yet).
+     * The owner's persisted intent: "recording should be active". No always-on mechanism
+     * (watchdog, boot receiver, process-start check in `AudioMemoApplication.onCreate()`) ever
+     * WRITES this flag — they only read it and decide whether to (re)start the service based on
+     * it. The only writer is [AppPreferencesRepository.setRecordingShouldBeActive], called `true`
+     * when a session actually starts and `false` from `stopRecordingCleanly()` when the owner
+     * explicitly stops.
+     *
+     * **Defaults to `true` (am-hotfix)**, not `false`, when the DataStore key was never written
+     * at all — the product's central premise is "always recording unless explicitly stopped", so
+     * a fresh install (or an existing install that upgraded but never wrote this key) reads as
+     * "should be recording" the moment `RECORD_AUDIO` is granted, rather than requiring a first
+     * manual tap to ever flip it on. This default-value change is what actually inverts the
+     * original "only grab, if already turned on manually" intent — this Flow's own read-only
+     * contract above is unchanged; only what an absent key means changed. Applies globally to
+     * every existing consumer of this flag (`BootCompletedReceiver.shouldAutoStart`,
+     * `RecordingWatchdogWorker.needsRestart`), not only the new
+     * `AudioMemoApplication.onCreate()` check — intentional: boot recovery and the periodic
+     * watchdog should also treat "never explicitly stopped" as "should be recording", the same
+     * "always on unless stopped" premise this hotfix establishes everywhere the flag is read.
      */
     val recordingShouldBeActive: Flow<Boolean> = dataStore.data.map { prefs ->
-        prefs[Keys.RECORDING_SHOULD_BE_ACTIVE] ?: false
+        prefs[Keys.RECORDING_SHOULD_BE_ACTIVE] ?: true
     }
 
     /**

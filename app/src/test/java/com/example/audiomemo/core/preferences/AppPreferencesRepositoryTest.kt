@@ -26,10 +26,10 @@ class AppPreferencesRepositoryTest : StringSpec({
         )
     }
 
-    "recordingShouldBeActive defaults to false when nothing was ever set" {
+    "recordingShouldBeActive defaults to true when nothing was ever set (am-hotfix: always-record-by-default)" {
         val repository = newRepository()
 
-        check(repository.recordingShouldBeActive.first() == false)
+        check(repository.recordingShouldBeActive.first() == true)
     }
 
     "setRecordingShouldBeActive(true) then recordingShouldBeActive reads back true" {
