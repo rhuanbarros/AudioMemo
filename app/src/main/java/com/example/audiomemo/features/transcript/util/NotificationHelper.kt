@@ -82,14 +82,10 @@ object NotificationHelper {
         stopIntent = stopIntent
     )
 
-    fun buildSilenceWarningNotification(
-        context: Context,
-        stopIntent: PendingIntent
-    ): Notification = buildOngoing(
-        context,
-        "No audio detected – Check microphone",
-        stopIntent = stopIntent
-    )
+    // am-hotfix (owner request, TCK-20260817154948-6428): buildSilenceWarningNotification ("No
+    // audio detected – Check microphone") was removed here — AudioRecordingService.
+    // handleSilenceDetected() now only logs (LogCategory.INTERRUPTION), never notifies. See that
+    // function's KDoc for the full rationale.
 
     // ── Alert states (am-hotfix, never-stop-recording) — real Android restrictions only ────────
 

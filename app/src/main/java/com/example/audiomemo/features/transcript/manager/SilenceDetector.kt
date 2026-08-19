@@ -14,8 +14,11 @@ import kotlinx.coroutines.launch
 
 /**
  * Monitors the MediaRecorder amplitude stream. After [SILENCE_TIMEOUT_MS] of continuous
- * silence (amplitude below [SILENCE_THRESHOLD]), fires [onSilenceDetected] once per
- * silence period so the service can show a "No audio detected – Check microphone" warning.
+ * silence (amplitude below [SILENCE_THRESHOLD]), fires [onSilenceDetected] once per silence
+ * period. As of the am-hotfix (owner request, TCK-20260817154948-6428) the current production
+ * wiring (`AudioRecordingService.handleSilenceDetected`) only logs this quietly — it no longer
+ * shows a "No audio detected – Check microphone" push notification, though this class's own
+ * detection logic (and the [onSilenceDetected] contract itself) is unchanged.
  *
  * Also checks on every tick whether RECORD_AUDIO has been revoked (Android 11+ one-time
  * permissions). Fires [onPermissionRevoked] so the service can stop cleanly.

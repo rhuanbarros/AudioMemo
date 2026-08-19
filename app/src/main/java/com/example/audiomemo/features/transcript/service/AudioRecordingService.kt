@@ -414,6 +414,18 @@ class AudioRecordingService : Service() {
         silenceDetector = SilenceDetector(
             context = this,
             amplitude = recorder.amplitude,
+            // am-hotfix (owner request, TCK-20260817154948-6428, 2026-08-19): the "No audio
+            // detected — check microphone" push notification was correctly firing during a real
+            // silence condition (e.g. the mic capturing near-nothing during a WhatsApp call, a
+            // documented OS-level restriction — see the kabbalah repo's
+            // wiki/ledger/decisao-de-produto/audiomemo-gravacao-nunca-para-por-escolha-propria.md,
+            // not something that lives inside this AudioMemo repo) but the owner doesn't want to
+            // be interrupted by it. Detection itself keeps running unchanged — it now logs
+            // quietly instead of pushing a notification, same pattern as every sibling
+            // interruption handler below (handleSourceChanged/handleBatteryLow/etc. all log even
+            // when they don't notify). am4-2's separate silent-chunk-upload-skip feature reads a
+            // different amplitude signal entirely (AudioRecorderManager.SILENCE_AMPLITUDE_THRESHOLD)
+            // and is untouched by this.
             onSilenceDetected = { handleSilenceDetected() },
             onPermissionRevoked = { handlePermissionRevoked() }
         )
@@ -637,14 +649,6 @@ class AudioRecordingService : Service() {
         }
     }
 
-    private fun handleSilenceDetected() {
-        if (_isStopped.value) return
-        NotificationHelper.updateNotification(
-            this,
-            NotificationHelper.buildSilenceWarningNotification(this, stopPendingIntent())
-        )
-    }
-
     /**
      * (am-hotfix, never-stop-recording): battery level is purely an app-policy decision — the
      * Android system never kills a foreground service just because the battery is low (confirmed
@@ -654,6 +658,21 @@ class AudioRecordingService : Service() {
      */
     private fun handleBatteryLow() {
         appEventLogger.log(LogCategory.INTERRUPTION, BATTERY_LOW_CONTINUES_MESSAGE)
+    }
+
+    /**
+     * (am-hotfix, owner request, TCK-20260817154948-6428): a sustained silence period (the mic
+     * capturing near-nothing for 10+ seconds — e.g. during a WhatsApp/phone call, a documented
+     * OS-level restriction, see the kabbalah repo's `wiki/ledger/decisao-de-produto/
+     * audiomemo-gravacao-nunca-para-por-escolha-propria.md`) used to push a "No audio detected"
+     * notification. The owner asked to stop being interrupted by it — this handler is now
+     * observability-only, same shape as [handleBatteryLow] right above: [SilenceDetector] itself
+     * is unchanged (still detects the same condition on the same schedule), only what happens
+     * after detection changed. Recording is never paused/stopped by this either way.
+     */
+    private fun handleSilenceDetected() {
+        if (_isStopped.value) return
+        appEventLogger.log(LogCategory.INTERRUPTION, "No audio detected for 10+ seconds")
     }
 
     /**
