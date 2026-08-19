@@ -128,11 +128,27 @@ fun HomeScreen(
         val hasRecordAudio = ContextCompat.checkSelfPermission(
             context, Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        if (!hasRecordAudio) {
+        // gps-location-capture-per-chunk: checked (and requested) alongside RECORD_AUDIO rather
+        // than only gated on it — an install that already granted RECORD_AUDIO in an earlier
+        // version (i.e. every existing install, including the owner's own device) would otherwise
+        // never see this prompt at all, since `!hasRecordAudio` would already be false forever.
+        // Location capture itself stays fully optional either way: an ungranted permission simply
+        // makes LocationCaptureManager skip silently (see that story's I/O matrix), never blocking
+        // recording.
+        val hasFineLocation = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasRecordAudio || !hasFineLocation) {
             val permissions = buildList {
-                add(Manifest.permission.RECORD_AUDIO)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    add(Manifest.permission.POST_NOTIFICATIONS)
+                if (!hasRecordAudio) {
+                    add(Manifest.permission.RECORD_AUDIO)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        add(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+                if (!hasFineLocation) {
+                    add(Manifest.permission.ACCESS_FINE_LOCATION)
+                    add(Manifest.permission.ACCESS_COARSE_LOCATION)
                 }
             }.toTypedArray()
             permissionLauncher.launch(permissions)

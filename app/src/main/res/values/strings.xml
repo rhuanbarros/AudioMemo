@@ -47,6 +47,8 @@
     <string name="settings_battery_optimization_explanation">Exempt LifeMemo from battery optimization so recording keeps running in the background without interruption.</string>
     <string name="settings_battery_optimization_granted_body">LifeMemo is exempt from battery optimization.</string>
     <string name="settings_battery_optimization_status_granted">Granted</string>
+    <string name="settings_location_capture">Location capture</string>
+    <string name="settings_location_capture_subtitle">Save GPS location with each recorded chunk</string>
 
     <!-- Logs -->
     <string name="logs_title">Logs</string>

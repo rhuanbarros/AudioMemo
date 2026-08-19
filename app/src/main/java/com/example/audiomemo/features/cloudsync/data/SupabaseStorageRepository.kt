@@ -60,4 +60,24 @@ class SupabaseStorageRepository @Inject constructor(
     } catch (e: Exception) {
         Result.failure(e)
     }
+
+    /**
+     * Uploads [file] (the `.txt` location sidecar [com.example.audiomemo.features.transcript.
+     * manager.LocationCaptureManager] may have written) to `"$sessionId/$chunkIndex.txt"` — same
+     * bucket, same path convention, `.txt` instead of `.m4a` (gps-location-capture-per-chunk).
+     * Same idempotent `upsert = true` shape as [uploadChunk] and the same
+     * `CancellationException`-propagates-but-everything-else-becomes-`Result.failure` contract —
+     * this is a best-effort, at-most-one-attempt upload per the story's Never clause (no dedicated
+     * retry mechanism), independent of whether the sibling `.m4a` upload for the same chunk
+     * succeeded or failed.
+     */
+    suspend fun uploadSidecar(sessionId: Long, chunkIndex: Int, file: File): Result<Unit> = try {
+        supabaseClient.storage.from(BUCKET_ID)
+            .upload(path = "$sessionId/$chunkIndex.txt", file = file, upsert = true)
+        Result.success(Unit)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Result.failure(e)
+    }
 }

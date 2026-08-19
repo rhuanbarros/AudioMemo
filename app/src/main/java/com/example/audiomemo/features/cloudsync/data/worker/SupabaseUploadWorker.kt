@@ -16,6 +16,7 @@ import dagger.hilt.components.SingletonComponent
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.gotrue.auth
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 
 @EntryPoint
@@ -191,6 +192,30 @@ class SupabaseUploadWorker(
             runAttemptCount < 3 -> SessionRecoveryOutcome.RETRY
             else -> SessionRecoveryOutcome.FAIL_TERMINAL
         }
+
+        /**
+         * Same basename as [audioFile], `.txt` extension — the location sidecar
+         * [com.example.audiomemo.features.transcript.manager.LocationCaptureManager] may have
+         * written next to it (gps-location-capture-per-chunk). Pure, filesystem-path-only,
+         * deliberately duplicated from that class's own `sidecarFileFor` rather than
+         * cross-package-coupled — this worker's only reason to know about the sidecar at all is
+         * this trivial one-liner, not worth importing the `transcript.manager` package for.
+         */
+        internal fun sidecarFileFor(audioFile: File): File =
+            File(audioFile.parentFile, "${audioFile.nameWithoutExtension}.txt")
+
+        /**
+         * Pure decision (gps-location-capture-per-chunk): the sidecar upload is only ever
+         * attempted once, right when the `.m4a` upload for the same chunk is first confirmed
+         * `SUCCESS` — never on `RETRY` (would otherwise re-attempt the sidecar upload on every
+         * WorkManager retry of the `.m4a`) and never on terminal `FAILURE` (the story's Never
+         * clause: best-effort, at most one attempt, no dedicated retry mechanism). Extracted so
+         * this "independent of, but gated by, the `.m4a` outcome" rule is unit-testable from
+         * plain-JVM `src/test`, mirroring [decideUploadOutcome]/[decideSessionRecoveryOutcome]
+         * above.
+         */
+        internal fun shouldAttemptSidecarUpload(resultKind: UploadWorkerResultKind): Boolean =
+            resultKind == UploadWorkerResultKind.SUCCESS
     }
 
     override suspend fun doWork(): Result {
@@ -335,6 +360,27 @@ class SupabaseUploadWorker(
             )
         }
 
+        // gps-location-capture-per-chunk: best-effort, independent of the .m4a's own
+        // status/deletion above — own try/catch (own runCatching, per the story's boundary), own
+        // local-delete, never touches `decision`/newStatus/the .m4a file, and never re-attempted
+        // on a WorkManager retry of this same chunk (see shouldAttemptSidecarUpload's KDoc).
+        if (shouldAttemptSidecarUpload(decision.resultKind)) {
+            try {
+                attemptSidecarUpload(
+                    storageRepository = storageRepository,
+                    appEventLogger = appEventLogger,
+                    sessionId = sessionId,
+                    chunkIndex = chunk.chunkIndex,
+                    chunkId = chunkId,
+                    audioFile = file
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Sidecar upload attempt threw unexpectedly for chunk $chunkId", e)
+            }
+        }
+
         when (decision.resultKind) {
             UploadWorkerResultKind.SUCCESS -> {
                 val latencyMs = computeUploadLatencyMs(enqueuedAtMs, System.currentTimeMillis())
@@ -356,6 +402,48 @@ class SupabaseUploadWorker(
             UploadWorkerResultKind.SUCCESS -> Result.success()
             UploadWorkerResultKind.RETRY -> Result.retry()
             UploadWorkerResultKind.FAILURE -> Result.failure()
+        }
+    }
+
+    /**
+     * Uploads [audioFile]'s `.txt` sidecar, if one exists, then deletes it locally on confirmed
+     * success. No-op (not even an upload attempt) when no sidecar file is present — the common
+     * case whenever location capture was off, ungranted, or had no fix for this chunk (see
+     * [com.example.audiomemo.features.transcript.manager.LocationCaptureManager]'s own I/O
+     * matrix). Never throws anything but `CancellationException` — [doWork]'s call site still
+     * wraps this in try/catch as defense-in-depth, matching every other isolated-failure call
+     * site in this codebase (e.g. `AudioRecordingService.onChunkCompleted`'s enqueue calls).
+     */
+    private suspend fun attemptSidecarUpload(
+        storageRepository: SupabaseStorageRepository,
+        appEventLogger: AppEventLogger,
+        sessionId: Long,
+        chunkIndex: Int,
+        chunkId: Long,
+        audioFile: File
+    ) {
+        val sidecarFile = sidecarFileFor(audioFile)
+        if (!sidecarFile.exists()) return
+
+        val result = storageRepository.uploadSidecar(sessionId, chunkIndex, sidecarFile)
+        if (result.isSuccess) {
+            if (!deleteConfirmedUploadFile(sidecarFile)) {
+                Log.w(
+                    TAG,
+                    "Failed to delete local sidecar file for chunk $chunkId: ${sidecarFile.path}"
+                )
+            }
+            appEventLogger.log(LogCategory.UPLOAD, "Location sidecar uploaded (chunk=$chunkId)")
+        } else {
+            Log.w(
+                TAG,
+                "Failed to upload location sidecar for chunk $chunkId",
+                result.exceptionOrNull()
+            )
+            appEventLogger.log(
+                LogCategory.UPLOAD,
+                "Location sidecar upload failed, left local (chunk=$chunkId)"
+            )
         }
     }
 }

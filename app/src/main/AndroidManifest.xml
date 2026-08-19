@@ -17,6 +17,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- am3-4 (FR4): let the user grant battery-optimization exemption from Settings -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- gps-location-capture-per-chunk: best-effort last-known-location capture per finished
+         chunk. No ACCESS_BACKGROUND_LOCATION here on purpose — see that story's Design Notes. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:name=".AudioMemoApplication"

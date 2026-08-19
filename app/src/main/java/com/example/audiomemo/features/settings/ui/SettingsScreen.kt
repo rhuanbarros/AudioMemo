@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Star
 import android.content.res.Configuration
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -54,9 +56,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.audiomemo.BuildConfig
 import com.example.audiomemo.R
 import com.example.audiomemo.ui.theme.AudioMemoTheme
@@ -74,9 +78,11 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit = {},
     onNavigateToAppearances: () -> Unit = {},
     onNavigateToCloudSync: () -> Unit = {},
-    onNavigateToLogs: () -> Unit = {}
+    onNavigateToLogs: () -> Unit = {},
+    viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
+    val locationCaptureEnabled by viewModel.locationCaptureEnabled.collectAsStateWithLifecycle()
 
     // am3-4 (FR4): battery-optimization exemption state, checked synchronously via
     // PowerManager. No dedicated ViewModel — the same stateless/direct pattern already
@@ -178,6 +184,25 @@ fun SettingsScreen(
                         icon = Icons.AutoMirrored.Filled.Article,
                         label = stringResource(R.string.settings_logs),
                         onClick = onNavigateToLogs
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(start = 52.dp)
+                    )
+                    // gps-location-capture-per-chunk: on/off switch for per-chunk location
+                    // capture. No onClick — the Switch itself is the whole interaction, mirroring
+                    // the settings_version row right below (trailingText-only, no onClick).
+                    SettingsRow(
+                        icon = Icons.Default.LocationOn,
+                        label = stringResource(R.string.settings_location_capture),
+                        subtitle = stringResource(R.string.settings_location_capture_subtitle),
+                        trailingContent = {
+                            Switch(
+                                checked = locationCaptureEnabled,
+                                onCheckedChange = { viewModel.setLocationCaptureEnabled(it) }
+                            )
+                        },
+                        onClick = null
                     )
                     HorizontalDivider(
                         color = MaterialTheme.colorScheme.outlineVariant,
@@ -321,6 +346,7 @@ private fun SettingsRow(
     label: String,
     subtitle: String? = null,
     trailingText: String? = null,
+    trailingContent: (@Composable () -> Unit)? = null,
     onClick: (() -> Unit)?
 ) {
     Row(
@@ -354,7 +380,9 @@ private fun SettingsRow(
                 )
             }
         }
-        if (trailingText != null) {
+        if (trailingContent != null) {
+            trailingContent()
+        } else if (trailingText != null) {
             Text(
                 text = trailingText,
                 style = MaterialTheme.typography.bodySmall,

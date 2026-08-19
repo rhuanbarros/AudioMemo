@@ -27,6 +27,13 @@ class AppPreferencesRepository @Inject constructor(
         // is also consumed by the am3-5 lost-chunk fix (see story am3-2 Design Notes).
         val RECORDING_SHOULD_BE_ACTIVE = booleanPreferencesKey("recording_should_be_active")
         val LAST_HEARTBEAT_AT = longPreferencesKey("last_heartbeat_at")
+
+        // gps-location-capture-per-chunk: owner-facing on/off switch for per-chunk location
+        // capture (Settings row). Same default-true-on-absent-key shape as
+        // RECORDING_SHOULD_BE_ACTIVE above — a fresh install (or an existing install that never
+        // wrote this key) captures location by default, requiring an explicit opt-out rather
+        // than an opt-in tap.
+        val LOCATION_CAPTURE_ENABLED = booleanPreferencesKey("location_capture_enabled")
     }
 
     val themeMode: Flow<ThemeMode> = dataStore.data.map { prefs ->
@@ -81,6 +88,16 @@ class AppPreferencesRepository @Inject constructor(
         prefs[Keys.LAST_HEARTBEAT_AT] ?: 0L
     }
 
+    /**
+     * The owner's persisted "capture location per chunk" toggle (gps-location-capture-per-chunk,
+     * Settings row). **Defaults to `true`** when the key was never written — mirrors
+     * [recordingShouldBeActive]'s default-true-on-absent-key rationale: the feature ships on by
+     * default, an explicit toggle-off is what persists `false`, not the other way around.
+     */
+    val locationCaptureEnabled: Flow<Boolean> = dataStore.data.map { prefs ->
+        prefs[Keys.LOCATION_CAPTURE_ENABLED] ?: true
+    }
+
     suspend fun setThemeMode(mode: ThemeMode) {
         dataStore.edit { it[Keys.THEME_MODE] = mode.name }
     }
@@ -104,5 +121,9 @@ class AppPreferencesRepository @Inject constructor(
      */
     suspend fun recordHeartbeat(now: Long = SystemClock.elapsedRealtime()) {
         dataStore.edit { it[Keys.LAST_HEARTBEAT_AT] = now }
+    }
+
+    suspend fun setLocationCaptureEnabled(value: Boolean) {
+        dataStore.edit { it[Keys.LOCATION_CAPTURE_ENABLED] = value }
     }
 }

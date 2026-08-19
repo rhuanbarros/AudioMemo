@@ -30,6 +30,7 @@ import com.example.audiomemo.features.transcript.domain.model.ChunkStatus
 import com.example.audiomemo.features.transcript.manager.AudioInterruptionManager
 import com.example.audiomemo.features.transcript.manager.AudioRecorderManager
 import com.example.audiomemo.features.transcript.manager.BatteryGuard
+import com.example.audiomemo.features.transcript.manager.LocationCaptureManager
 import com.example.audiomemo.features.transcript.manager.MediaButtonHandler
 import com.example.audiomemo.features.transcript.manager.SessionStateManager
 import com.example.audiomemo.features.transcript.manager.SilenceDetector
@@ -43,6 +44,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -266,6 +268,7 @@ class AudioRecordingService : Service() {
     private lateinit var sessionStateManager: SessionStateManager
     private lateinit var batteryGuard: BatteryGuard
     private lateinit var mediaButtonHandler: MediaButtonHandler
+    private lateinit var locationCaptureManager: LocationCaptureManager
 
     /** True while the service is actively recording (not stopped). Used to reject duplicate starts. */
     private var isRecordingActive = false
@@ -329,6 +332,7 @@ class AudioRecordingService : Service() {
 
         recorder = AudioRecorderManager(applicationContext)
         sessionStateManager = SessionStateManager(sessionDao, chunkDao)
+        locationCaptureManager = LocationCaptureManager()
 
         recorder.onChunkCompleted = { file, amplitudeOutcome ->
             lastChunkSaveJob = serviceScope.launch {
@@ -376,6 +380,43 @@ class AudioRecordingService : Service() {
                     if (!shouldEnqueueSupabaseUpload(amplitudeOutcome)) {
                         appEventLogger.log(LogCategory.UPLOAD, "Chunk skipped: no audio detected (id=$chunkId)")
                     } else {
+                        // gps-location-capture-per-chunk: best-effort, isolated from the enqueue
+                        // right below — reads the owner's toggle fresh each chunk (never cached),
+                        // skips entirely (no location API call at all) when it's off. Moved inside
+                        // this "will actually upload" branch in review_loop_iteration 1 (Verification
+                        // Gap finding): a silent chunk never reaches enqueueSupabaseUpload at all
+                        // (see the branch above), so capturing here unconditionally used to leave a
+                        // sidecar .txt permanently orphaned on local storage for every silent chunk —
+                        // this branch is the one place both capture and enqueue always happen
+                        // together. Still called BEFORE enqueueSupabaseUpload so the worker sees the
+                        // sidecar file if/when it runs — this call is itself suspend/sequential in
+                        // this same coroutine, so "before" here also means "awaited before", not just
+                        // "earlier in the source". The whole thing (preference read included) is
+                        // inside a single runCatching — defense-in-depth on top of
+                        // LocationCaptureManager's own internal try/catch, per the story's boundary:
+                        // a failure here (even a DataStore read hiccup) must never block the
+                        // Supabase enqueue call.
+                        runCatching {
+                            if (appPreferencesRepository.locationCaptureEnabled.first()) {
+                                val captured = locationCaptureManager.captureLocationSidecar(applicationContext, file)
+                                // review_loop_iteration 1 (Blind Hunter finding): capture-step
+                                // outcomes were previously visible only in Logcat (Log.w on
+                                // exception) — appEventLogger is what actually reaches the in-app
+                                // Logs screen. A `false` return isn't necessarily an error (no
+                                // permission / no fix / stale fix are all normal, expected skips per
+                                // LocationCaptureManager's own I/O matrix), so this is UPLOAD-category
+                                // informational, not a warning.
+                                appEventLogger.log(
+                                    LogCategory.UPLOAD,
+                                    if (captured) {
+                                        "Location captured (id=$chunkId)"
+                                    } else {
+                                        "Location not captured (id=$chunkId) — no permission, no recent fix, or write failed"
+                                    }
+                                )
+                            }
+                        }.onFailure { Log.w(TAG, "Location capture failed for chunk $chunkId", it) }
+
                         runCatching { enqueueSupabaseUpload(chunkId, sessionId) }
                             .onFailure { Log.w(TAG, "Failed to enqueue SupabaseUploadWorker for chunk $chunkId", it) }
                     }

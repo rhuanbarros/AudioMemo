@@ -67,4 +67,29 @@ class AppPreferencesRepositoryTest : StringSpec({
 
         check(repository.lastHeartbeatAt.first() == fakeNow)
     }
+
+    // ── gps-location-capture-per-chunk ──────────────────────────────────────────
+
+    "locationCaptureEnabled defaults to true when nothing was ever set (ships on by default)" {
+        val repository = newRepository()
+
+        check(repository.locationCaptureEnabled.first() == true)
+    }
+
+    "setLocationCaptureEnabled(false) then locationCaptureEnabled reads back false" {
+        val repository = newRepository()
+
+        repository.setLocationCaptureEnabled(false)
+
+        check(repository.locationCaptureEnabled.first() == false)
+    }
+
+    "setLocationCaptureEnabled(true) after false reads back true" {
+        val repository = newRepository()
+
+        repository.setLocationCaptureEnabled(false)
+        repository.setLocationCaptureEnabled(true)
+
+        check(repository.locationCaptureEnabled.first() == true)
+    }
 })
