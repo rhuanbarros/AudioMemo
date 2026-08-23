@@ -1,12 +1,19 @@
 package com.example.audiomemo.features.transcript.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Binder
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -79,6 +86,18 @@ class AudioRecordingService : Service() {
          * would be expensive; this is a separate, much lighter ticker.
          */
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
+
+        /**
+         * How often [startActiveLocationUpdates] asks `LocationManager` for a fresh fix while
+         * recording (am-hotfix-active-location-fix). Not specced by the story (implementer
+         * discretion, per its Design Notes) — 15 minutes is the low end of the "roughly 15-20
+         * minutes" battery/freshness balance the story asks for, same order of magnitude as the
+         * now-superseded [com.example.audiomemo.features.transcript.manager.
+         * LocationCaptureManager.MAX_FIX_AGE_MS] staleness threshold this hotfix exists to stop
+         * tripping on every capture. The owner explicitly accepted the battery tradeoff of an
+         * active request over the passive system cache that motivated this whole story.
+         */
+        internal const val ACTIVE_LOCATION_UPDATE_INTERVAL_MS = 15 * 60 * 1_000L
 
         /**
          * Builds the exact [OneTimeWorkRequest] [enqueueSupabaseUpload] passes to `WorkManager`.
@@ -170,6 +189,13 @@ class AudioRecordingService : Service() {
 
         internal const val LOW_STORAGE_STOPPED_MESSAGE = "Low storage — recording stopped"
         internal const val PERMISSION_REVOKED_STOPPED_MESSAGE = "Permission revoked — recording stopped"
+
+        /** (am-hotfix, startForeground crash guard) — must follow the same convention as the
+         *  siblings above (INTERRUPTION category, "— recording stopped" suffix) so
+         *  `HomeViewModel.classifyEvent` picks it up as HealthState.ERROR instead of leaving the
+         *  health strip showing stale state while the service is actually dead. */
+        internal const val START_FOREGROUND_FAILED_STOPPED_MESSAGE =
+            "Recording failed to start — recording stopped"
 
         /** Battery-low is no longer a stop (am-hotfix, never-stop-recording) — observability only,
          *  deliberately does NOT end in "— recording stopped" so it's never misclassified ERROR. */
@@ -269,6 +295,23 @@ class AudioRecordingService : Service() {
     private lateinit var batteryGuard: BatteryGuard
     private lateinit var mediaButtonHandler: MediaButtonHandler
     private lateinit var locationCaptureManager: LocationCaptureManager
+
+    /**
+     * Latest fix from [startActiveLocationUpdates]'s `LocationManager.requestLocationUpdates`
+     * registration, read by [LocationCaptureManager.captureLocationSidecar] as its primary source
+     * (am-hotfix-active-location-fix). `@Volatile`: written on the main thread (the listener
+     * below runs on [Looper.getMainLooper]) but read from `serviceScope` (`Dispatchers.IO`) in
+     * `onChunkCompleted` — same cross-thread-visibility need as [isMediaButtonPaused].
+     */
+    @Volatile private var lastActiveLocation: Location? = null
+
+    /**
+     * Single listener instance registered/unregistered as a pair in
+     * [startActiveLocationUpdates]/[stopActiveLocationUpdates] — `LocationManager.removeUpdates`
+     * takes the listener instance, not a provider name, so one object covers every provider it
+     * was registered against.
+     */
+    private val activeLocationListener = LocationListener { location -> lastActiveLocation = location }
 
     /** True while the service is actively recording (not stopped). Used to reject duplicate starts. */
     private var isRecordingActive = false
@@ -398,7 +441,9 @@ class AudioRecordingService : Service() {
                         // Supabase enqueue call.
                         runCatching {
                             if (appPreferencesRepository.locationCaptureEnabled.first()) {
-                                val captured = locationCaptureManager.captureLocationSidecar(applicationContext, file)
+                                val captured = locationCaptureManager.captureLocationSidecar(
+                                    applicationContext, file, lastActiveLocation
+                                )
                                 // review_loop_iteration 1 (Blind Hunter finding): capture-step
                                 // outcomes were previously visible only in Logcat (Log.w on
                                 // exception) — appEventLogger is what actually reaches the in-app
@@ -507,10 +552,28 @@ class AudioRecordingService : Service() {
         isRecordingActive = true
         appEventLogger.log(LogCategory.RECORDING, "Recording started")
         NotificationHelper.createNotificationChannel(this)
-        startForeground(
-            NotificationHelper.NOTIFICATION_ID,
-            NotificationHelper.buildForegroundNotification(this, stopPendingIntent())
-        )
+        try {
+            startForeground(
+                NotificationHelper.NOTIFICATION_ID,
+                NotificationHelper.buildForegroundNotification(this, stopPendingIntent())
+            )
+        } catch (e: IllegalStateException) {
+            // On Android 12+ a background-initiated foreground-service start can throw
+            // ForegroundServiceStartNotAllowedException. Caught as the plain IllegalStateException
+            // supertype rather than the API-31 class by name, to avoid a class-verification
+            // failure on pre-31 devices where that class is never actually thrown — same pattern
+            // as BootCompletedReceiver.
+            handleStartForegroundFailure(e)
+            return START_NOT_STICKY
+        } catch (e: SecurityException) {
+            // (am-hotfix, startForeground crash guard): confirmed via real-device logcat
+            // (Samsung, 2026-08-23) — starting a foreground service of type microphone from a
+            // background-initiated context (e.g. right after BOOT_COMPLETED, on Android 14) can
+            // throw this exact exception. Same "degrade gracefully, never crash" contract as the
+            // IllegalStateException catch above.
+            handleStartForegroundFailure(e)
+            return START_NOT_STICKY
+        }
 
         // am3-5: must complete — and currentSessionId must be set — before recorder.startRecording()
         // runs below. onChunkStarted fires synchronously inside startRecording() (for the
@@ -582,8 +645,106 @@ class AudioRecordingService : Service() {
         silenceDetector.start()
         batteryGuard.start()
         mediaButtonHandler.start()
+        startActiveLocationUpdates()
 
         return START_STICKY
+    }
+
+    /**
+     * (am-hotfix-active-location-fix): registers a low-frequency active `LocationManager` fix
+     * request for the lifetime of the recording service — [LocationCaptureManager] previously
+     * only read the passive system cache (`getLastKnownLocation`), which nothing else on the
+     * device refreshes during normal use and goes stale after the first capture. Called once per
+     * service start (mirrors [interruptionManager]/[silenceDetector]/[batteryGuard]/
+     * [mediaButtonHandler] all starting together right above); [stopActiveLocationUpdates] in
+     * [onDestroy] is the matching teardown — never left registered past the service's lifetime.
+     *
+     * GPS provider requested only with `ACCESS_FINE_LOCATION`, Network provider with either FINE
+     * or COARSE — same permission split [LocationCaptureManager.lastKnownLocation] already uses,
+     * kept consistent rather than inventing a different rule here. Both registrations (when
+     * eligible) share [activeLocationListener], so whichever provider reports first updates
+     * [lastActiveLocation]; each registration is individually guarded (mirrors
+     * [LocationCaptureManager.safeLastKnownLocation]'s per-provider try/catch) so a device
+     * lacking one provider, or missing `ACCESS_BACKGROUND_LOCATION` (denied/unavailable —
+     * degrades to whatever foreground-only delivery the OS still allows, never a crash), doesn't
+     * prevent the other from registering.
+     */
+    private fun startActiveLocationUpdates() {
+        val locationManager = getSystemService(LOCATION_SERVICE) as? LocationManager ?: return
+        val hasFineLocation = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasCoarseLocation = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasFineLocation && !hasCoarseLocation) return
+
+        if (hasFineLocation) {
+            try {
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    ACTIVE_LOCATION_UPDATE_INTERVAL_MS,
+                    0f,
+                    activeLocationListener,
+                    Looper.getMainLooper()
+                )
+            } catch (e: Exception) {
+                // SecurityException (permission revoked between the check above and this call) or
+                // IllegalArgumentException (no GPS chip on this device) — Network below still
+                // gets its own attempt.
+                Log.w(TAG, "Failed to register active GPS_PROVIDER location updates", e)
+            }
+        }
+        try {
+            locationManager.requestLocationUpdates(
+                LocationManager.NETWORK_PROVIDER,
+                ACTIVE_LOCATION_UPDATE_INTERVAL_MS,
+                0f,
+                activeLocationListener,
+                Looper.getMainLooper()
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register active NETWORK_PROVIDER location updates", e)
+        }
+    }
+
+    /**
+     * Matching teardown for [startActiveLocationUpdates] — removes [activeLocationListener] from
+     * every provider it was registered against in one call. Always safe to call even when
+     * registration never happened (e.g. permission missing, or the service never reached
+     * [onStartCommand]'s recording-start branch) — `LocationManager.removeUpdates` on a listener
+     * that was never registered is a documented no-op, and this is additionally wrapped so any
+     * unexpected throw here can never block the rest of [onDestroy]'s teardown.
+     */
+    private fun stopActiveLocationUpdates() {
+        try {
+            val locationManager = getSystemService(LOCATION_SERVICE) as? LocationManager ?: return
+            locationManager.removeUpdates(activeLocationListener)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister active location updates", e)
+        }
+    }
+
+    /**
+     * (am-hotfix, startForeground crash guard): shared failure tail for both catch clauses around
+     * the `startForeground()` call in [onStartCommand]. Reverts [isRecordingActive] — set `true`
+     * just above the try/catch — back to `false`, since it must never be left `true` without a
+     * successful `startForeground()` call: the duplicate-start guard at the top of this method
+     * (`if (isRecordingActive) return START_STICKY`) would otherwise leave the service permanently
+     * stuck believing it's recording. Calls [stopSelf] because a `Service` can't continue as a
+     * foreground service without a successful `startForeground()`; the caller returns
+     * `START_NOT_STICKY` right after this so the system doesn't retry a start that would fail
+     * identically.
+     */
+    private fun handleStartForegroundFailure(e: Exception) {
+        isRecordingActive = false
+        Log.w(TAG, "startForeground() failed — cannot start recording", e)
+        // INTERRUPTION category + the shared "— recording stopped" suffix convention (see the
+        // constant's own KDoc) — code review patch: using RECORDING category / different wording
+        // here would leave HomeViewModel.classifyEvent's health strip silently stale exactly when
+        // this failure fires, since nothing else marks the service as actually down.
+        appEventLogger.log(LogCategory.INTERRUPTION, START_FOREGROUND_FAILED_STOPPED_MESSAGE)
+        stopSelf()
     }
 
     override fun onBind(intent: Intent): IBinder = binder
@@ -597,6 +758,11 @@ class AudioRecordingService : Service() {
             serviceScope.launch { sessionStateManager.pauseSession() }
         }
         mediaButtonHandler.stop()
+        // (am-hotfix-active-location-fix): unconditional, unlike the block above — active
+        // location updates are registered once in onStartCommand regardless of which stop path
+        // got here (explicit stop already flips _isStopped before onDestroy runs), so teardown
+        // must run every time onDestroy runs, never gated on _isStopped.
+        stopActiveLocationUpdates()
         serviceScope.cancel()
         super.onDestroy()
     }

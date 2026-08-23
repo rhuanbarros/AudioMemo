@@ -17,10 +17,16 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- am3-4 (FR4): let the user grant battery-optimization exemption from Settings -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- gps-location-capture-per-chunk: best-effort last-known-location capture per finished
-         chunk. No ACCESS_BACKGROUND_LOCATION here on purpose — see that story's Design Notes. -->
+    <!-- gps-location-capture-per-chunk / am-hotfix-active-location-fix: best-effort location
+         capture per finished chunk. ACCESS_BACKGROUND_LOCATION was deliberately NOT requested by
+         the original story (passive lastKnownLocation only); the hotfix supersedes that — the
+         passive system cache goes stale after the first capture with nothing else refreshing it,
+         so AudioRecordingService now registers active low-frequency LocationManager updates while
+         recording, which on Android 10+ count as background requests for a foregroundServiceType
+         "microphone" service and need this permission. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <application
         android:name=".AudioMemoApplication"

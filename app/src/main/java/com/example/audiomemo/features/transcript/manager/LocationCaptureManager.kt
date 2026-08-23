@@ -19,19 +19,29 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Best-effort GPS + reverse-geocode capture for a just-finished audio chunk
- * (TCK-20260819203531-d43b, gps-location-capture-per-chunk). Plain, manually-instantiated class —
- * not Hilt — mirroring [AudioRecorderManager]/[AudioInterruptionManager]'s pattern;
+ * (TCK-20260819203531-d43b, gps-location-capture-per-chunk; active-fix primary source since
+ * am-hotfix-active-location-fix). Plain, manually-instantiated class — not Hilt — mirroring
+ * [AudioRecorderManager]/[AudioInterruptionManager]'s pattern;
  * [com.example.audiomemo.features.transcript.service.AudioRecordingService] owns its single
  * instance and calls this from the already-async `onChunkCompleted` path, never the blocking
  * `onChunkStarted` one (per `wiki/ledger/decisao-de-produto/
  * audiomemo-gravacao-nunca-para-por-escolha-propria.md` in the kabbalah repo).
  *
- * Every Android SDK call in here (last-known-location fix, reverse geocode) is individually
- * guarded so a missing permission / no fix / geocode failure / thrown exception never propagates
- * out of [captureLocationSidecar] — it always resolves to `true`/`false`, never throws. The
- * caller (`AudioRecordingService`) additionally wraps its own call site in `runCatching` as
- * defense-in-depth, per the story's "never crash the service or block Whisper/Supabase enqueue"
- * boundary.
+ * am-hotfix-active-location-fix: the original design read only `LocationManager.
+ * getLastKnownLocation()` — a passive system cache nothing else on the device refreshes during
+ * normal use, so after the first capture right after a fresh permission grant it goes stale and
+ * every capture since silently fails. `AudioRecordingService` now registers active low-frequency
+ * `LocationManager.requestLocationUpdates` while it runs and passes its latest cached fix in as
+ * [captureLocationSidecar]'s `activeLocation` parameter — that active fix is the primary source;
+ * the passive [lastKnownLocation] read stays as a fallback for the window before the first active
+ * update has arrived (e.g. right after the service starts), same staleness gate applied either way.
+ *
+ * Every Android SDK call in here (passive last-known-location fix, reverse geocode) is
+ * individually guarded so a missing permission / no fix / geocode failure / thrown exception
+ * never propagates out of [captureLocationSidecar] — it always resolves to `true`/`false`, never
+ * throws. The caller (`AudioRecordingService`) additionally wraps its own call site in
+ * `runCatching` as defense-in-depth, per the story's "never crash the service or block
+ * Whisper/Supabase enqueue" boundary.
  *
  * The three functions in the companion object are the "small seam" the story's Code Map asks
  * for: pure, `Context`/SDK-free, and unit-testable from plain-JVM `src/test` — unlike
@@ -137,20 +147,31 @@ class LocationCaptureManager {
     }
 
     /**
-     * Best-effort capture: writes a `.txt` sidecar next to [audioFile] when a last-known fix is
+     * Best-effort capture: writes a `.txt` sidecar next to [audioFile] when a fresh fix is
      * available, does nothing (returns `false`, writes no file) otherwise — permission missing,
-     * no cached fix on either provider, or any thrown exception along the way. A geocode
+     * no fresh fix from either source, or any thrown exception along the way. A geocode
      * failure/timeout is NOT one of those skip cases: the sidecar is still written with
      * coordinates only, per the story's I/O matrix.
+     *
+     * [activeLocation] (am-hotfix-active-location-fix) is `AudioRecordingService`'s latest
+     * `LocationManager.requestLocationUpdates` fix, cached in-memory while the service runs — the
+     * primary source, checked for freshness first. `null` (no active update has arrived yet, e.g.
+     * right after service start) falls back to the passive [lastKnownLocation] read, same
+     * freshness gate applied either way.
      */
-    suspend fun captureLocationSidecar(context: Context, audioFile: File): Boolean = try {
+    suspend fun captureLocationSidecar(
+        context: Context,
+        audioFile: File,
+        activeLocation: Location? = null
+    ): Boolean = try {
         if (!hasLocationPermission(context)) {
             false
         } else {
-            val location = lastKnownLocation(context)
-            if (location == null || !isLocationFresh(location.time)) {
-                // A stale fix (see isLocationFresh's KDoc for the threshold rationale) is treated
-                // exactly like "no fix" — review patch, Blind Hunter, review_loop_iteration 1.
+            val location = activeLocation?.takeIf { isLocationFresh(it.time) }
+                ?: lastKnownLocation(context)?.takeIf { isLocationFresh(it.time) }
+            if (location == null) {
+                // Neither the active cache nor the passive fallback has a fresh fix (see
+                // isLocationFresh's KDoc for the threshold rationale) — treated as "no fix".
                 false
             } else {
                 val rawAddress = withTimeoutOrNull(GEOCODE_TIMEOUT_MS) {
@@ -210,10 +231,13 @@ class LocationCaptureManager {
      * GPS provider first (only attempted when FINE is granted — `GPS_PROVIDER` requires it, a
      * COARSE-only grant would otherwise throw `SecurityException` on every call and rely on the
      * catch-all in [safeLastKnownLocation] to mask it), Network provider as fallback (usable with
-     * either FINE or COARSE). No active fix request (per the story's Never clause: no
-     * `ACCESS_BACKGROUND_LOCATION`, only whatever the system already has cached). Each provider
-     * read is individually guarded: a device without a GPS chip (or with the provider disabled)
-     * must still fall through to Network, not abort the whole lookup.
+     * either FINE or COARSE). Reads whatever the system already has cached — no active fix
+     * request of its own (that's
+     * [com.example.audiomemo.features.transcript.service.AudioRecordingService]'s job since
+     * am-hotfix-active-location-fix;
+     * see [captureLocationSidecar]'s `activeLocation` parameter, of which this is only the
+     * fallback path). Each provider read is individually guarded: a device without a GPS chip (or
+     * with the provider disabled) must still fall through to Network, not abort the whole lookup.
      */
     private fun lastKnownLocation(context: Context): Location? {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager

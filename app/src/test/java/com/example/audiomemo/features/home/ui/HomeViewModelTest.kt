@@ -177,6 +177,15 @@ class HomeViewModelTest : StringSpec({
 
         check(
             HomeViewModel.classifyEvent(
+                LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.START_FOREGROUND_FAILED_STOPPED_MESSAGE)
+            ) == HealthState.ERROR
+        ) {
+            "the real startForeground()-rejected-stop message (am-hotfix crash guard) must " +
+                "classify as ERROR, not silently leave the health strip on stale state"
+        }
+
+        check(
+            HomeViewModel.classifyEvent(
                 LogEvent(0, LogCategory.INTERRUPTION, AudioRecordingService.BATTERY_LOW_CONTINUES_MESSAGE)
             ) == null
         ) {

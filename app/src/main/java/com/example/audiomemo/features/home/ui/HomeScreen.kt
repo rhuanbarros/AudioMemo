@@ -114,6 +114,21 @@ fun HomeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    // (am-hotfix-active-location-fix): ACCESS_BACKGROUND_LOCATION must be its own separate
+    // request, never bundled into the RequestMultiplePermissions() call below — Android 11+/API
+    // 30+ silently drops the background grant when it's requested alongside foreground
+    // permissions in one call. Denied/unavailable: no in-app UI reacts (same "zero manual
+    // controls" boundary as the rest of this screen) — active location updates simply degrade to
+    // whatever foreground-only delivery the OS still allows (see AudioRecordingService.
+    // startActiveLocationUpdates), never blocking recording.
+    val backgroundLocationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Log.w(TAG, "ACCESS_BACKGROUND_LOCATION denied — location capture limited to foreground")
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -122,6 +137,17 @@ fun HomeScreen(
         }
         // Denied: no in-app UI reacts to this (same "zero manual controls" boundary as the rest
         // of this screen) — the OS's own re-prompt/rationale policy applies, same as before.
+
+        // (am-hotfix-active-location-fix): the background-location step only makes sense once
+        // foreground location is actually granted — re-check against the live permission state
+        // rather than trusting only this callback's map, since a foreground grant already present
+        // from an earlier run never appears here at all (see the LaunchedEffect branch below).
+        val hasForegroundLocation = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        requestBackgroundLocationIfNeeded(context, hasForegroundLocation, backgroundLocationLauncher)
     }
 
     LaunchedEffect(Unit) {
@@ -138,6 +164,9 @@ fun HomeScreen(
         val hasFineLocation = ContextCompat.checkSelfPermission(
             context, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
+        val hasCoarseLocation = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
         if (!hasRecordAudio || !hasFineLocation) {
             val permissions = buildList {
                 if (!hasRecordAudio) {
@@ -152,6 +181,13 @@ fun HomeScreen(
                 }
             }.toTypedArray()
             permissionLauncher.launch(permissions)
+        } else {
+            // (am-hotfix-active-location-fix): foreground location was already granted from an
+            // earlier version/run — permissionLauncher's callback above never fires in that case,
+            // so the separate background-location step needs to happen from here instead.
+            requestBackgroundLocationIfNeeded(
+                context, hasFineLocation || hasCoarseLocation, backgroundLocationLauncher
+            )
         }
     }
 
@@ -184,6 +220,30 @@ private fun startRecordingServiceAfterPermissionGranted(context: android.content
     } catch (e: SecurityException) {
         // E.g. the permission was revoked again between the grant callback and this call.
         Log.w(TAG, "Failed to start recording right after permission grant", e)
+    }
+}
+
+/**
+ * (am-hotfix-active-location-fix): launches the separate `ACCESS_BACKGROUND_LOCATION` request —
+ * never bundled with the `RECORD_AUDIO`/fine/coarse call, per Android's required sequencing (API
+ * 30+ silently drops a background grant requested alongside foreground permissions in the same
+ * call). No-ops when [hasForegroundLocation] is false (Android rejects a background-location
+ * request before foreground is granted anyway), below API 29 (the permission doesn't meaningfully
+ * exist pre-Q — a foreground grant already covers background reads on those OS versions), or when
+ * background is already granted.
+ */
+private fun requestBackgroundLocationIfNeeded(
+    context: android.content.Context,
+    hasForegroundLocation: Boolean,
+    launcher: androidx.activity.result.ActivityResultLauncher<String>
+) {
+    if (!hasForegroundLocation) return
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    val hasBackgroundLocation = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.ACCESS_BACKGROUND_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+    if (!hasBackgroundLocation) {
+        launcher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
     }
 }
 
